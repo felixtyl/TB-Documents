@@ -181,6 +181,55 @@ export default function App() {
 
   function logout() { supabase.auth.signOut(); setView('dashboard'); }
 
+  // ---------- Derived ----------
+  // These hooks must run on every render regardless of auth state, so they live
+  // above all early returns below. docs/submissions are [] until data loads,
+  // which is a safe input for all of these.
+  const withStatus = useMemo(() => docs.map(d => ({ ...d, effStatus: effectiveStatus(d) })), [docs]);
+  const filtered = useMemo(() => withStatus.filter(d => {
+    if (filterType !== 'All' && d.type !== filterType) return false;
+    if (filterStatus !== 'All' && d.effStatus !== filterStatus) return false;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      if (!d.title.toLowerCase().includes(q) && !(d.department || '').toLowerCase().includes(q) && !(d.owner || '').toLowerCase().includes(q)) return false;
+    }
+    return true;
+  }), [withStatus, filterType, filterStatus, search]);
+
+  const kpis = useMemo(() => {
+    const total = withStatus.length;
+    const approved = withStatus.filter(d => d.effStatus === 'Approved').length;
+    const pending = withStatus.filter(d => d.effStatus === 'Pending Approval').length;
+    const expired = withStatus.filter(d => d.effStatus === 'Expired').length;
+    const expiringSoon = withStatus.filter(d => {
+      if (d.effStatus !== 'Approved' || !d.expiryDate) return false;
+      const days = daysUntil(d.expiryDate);
+      return days !== null && days >= 0 && days <= 30;
+    }).length;
+    const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
+    const submissionsThisWeek = submissions.filter(s => new Date(s.filledAtTime || s.filledAt) >= weekAgo).length;
+    return { total, approved, pending, expired, expiringSoon, submissionsThisWeek };
+  }, [withStatus, submissions]);
+
+  const statusChartData = useMemo(() => {
+    const counts = { Approved: 0, 'Pending Approval': 0, Draft: 0, Expired: 0 };
+    withStatus.forEach(d => { counts[d.effStatus] = (counts[d.effStatus] || 0) + 1; });
+    return Object.entries(counts).filter(([, v]) => v > 0).map(([name, value]) => ({ name, value }));
+  }, [withStatus]);
+  const typeChartData = useMemo(() => {
+    const counts = {};
+    withStatus.forEach(d => { counts[d.type] = (counts[d.type] || 0) + 1; });
+    return Object.entries(counts).map(([name, count]) => ({ name, count }));
+  }, [withStatus]);
+  const expiringList = useMemo(() => withStatus
+    .filter(d => d.effStatus === 'Approved' && d.expiryDate)
+    .map(d => ({ ...d, days: daysUntil(d.expiryDate) }))
+    .filter(d => d.days !== null && d.days <= 30)
+    .sort((a, b) => a.days - b.days).slice(0, 6), [withStatus]);
+  const recentSubmissions = useMemo(() =>
+    [...submissions].sort((a, b) => new Date(b.filledAtTime || b.filledAt) - new Date(a.filledAtTime || a.filledAt)).slice(0, 6),
+    [submissions]);
+
   // ================= Auth screens =================
   if (!authLoaded) return <CenteredMessage text="Loading…" />;
 
@@ -377,52 +426,6 @@ export default function App() {
     if (error) { setAuthError(error.message); return; }
     // Refresh the users list held in UserManagement via a full profiles refetch, handled in that component.
   }
-
-  // ---------- Derived ----------
-  const withStatus = useMemo(() => docs.map(d => ({ ...d, effStatus: effectiveStatus(d) })), [docs]);
-  const filtered = useMemo(() => withStatus.filter(d => {
-    if (filterType !== 'All' && d.type !== filterType) return false;
-    if (filterStatus !== 'All' && d.effStatus !== filterStatus) return false;
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      if (!d.title.toLowerCase().includes(q) && !(d.department || '').toLowerCase().includes(q) && !(d.owner || '').toLowerCase().includes(q)) return false;
-    }
-    return true;
-  }), [withStatus, filterType, filterStatus, search]);
-
-  const kpis = useMemo(() => {
-    const total = withStatus.length;
-    const approved = withStatus.filter(d => d.effStatus === 'Approved').length;
-    const pending = withStatus.filter(d => d.effStatus === 'Pending Approval').length;
-    const expired = withStatus.filter(d => d.effStatus === 'Expired').length;
-    const expiringSoon = withStatus.filter(d => {
-      if (d.effStatus !== 'Approved' || !d.expiryDate) return false;
-      const days = daysUntil(d.expiryDate);
-      return days !== null && days >= 0 && days <= 30;
-    }).length;
-    const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7);
-    const submissionsThisWeek = submissions.filter(s => new Date(s.filledAtTime || s.filledAt) >= weekAgo).length;
-    return { total, approved, pending, expired, expiringSoon, submissionsThisWeek };
-  }, [withStatus, submissions]);
-
-  const statusChartData = useMemo(() => {
-    const counts = { Approved: 0, 'Pending Approval': 0, Draft: 0, Expired: 0 };
-    withStatus.forEach(d => { counts[d.effStatus] = (counts[d.effStatus] || 0) + 1; });
-    return Object.entries(counts).filter(([, v]) => v > 0).map(([name, value]) => ({ name, value }));
-  }, [withStatus]);
-  const typeChartData = useMemo(() => {
-    const counts = {};
-    withStatus.forEach(d => { counts[d.type] = (counts[d.type] || 0) + 1; });
-    return Object.entries(counts).map(([name, count]) => ({ name, count }));
-  }, [withStatus]);
-  const expiringList = useMemo(() => withStatus
-    .filter(d => d.effStatus === 'Approved' && d.expiryDate)
-    .map(d => ({ ...d, days: daysUntil(d.expiryDate) }))
-    .filter(d => d.days !== null && d.days <= 30)
-    .sort((a, b) => a.days - b.days).slice(0, 6), [withStatus]);
-  const recentSubmissions = useMemo(() =>
-    [...submissions].sort((a, b) => new Date(b.filledAtTime || b.filledAt) - new Date(a.filledAtTime || a.filledAt)).slice(0, 6),
-    [submissions]);
 
   const NavItem = ({ id, icon: Icon, label }) => (
     <button onClick={() => setView(id)} style={{
