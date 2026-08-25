@@ -8,8 +8,10 @@ import {
   AlertTriangle, CheckCircle2, Clock, FileEdit, ChevronRight,
   Paperclip, Image as ImageIcon, Download, File as FileIcon, Loader2,
   Users, LogOut, ShieldCheck, UserPlus, ClipboardList,
-  ClipboardCheck, ArrowUp, ArrowDown, ListChecks, Ban, ShieldOff
+  ClipboardCheck, ArrowUp, ArrowDown, ListChecks, Ban, ShieldOff,
+  Upload, Printer, Camera
 } from 'lucide-react';
+import mammoth from 'mammoth';
 import { supabase } from './supabaseClient';
 
 const C = {
@@ -22,7 +24,7 @@ const C = {
 const TYPE_OPTIONS = ['SOP', 'JSA', 'OPL', 'Inspection Checklist', 'Work Instruction', 'Training Record', 'Other'];
 const STATUS_OPTIONS = ['Draft', 'Pending Approval', 'Approved'];
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // Supabase free tier allows larger files than the old artifact limit
-const FIELD_TYPES = ['Text', 'Notes', 'Number', 'Date', 'Yes/No', 'Pass/Fail', 'Multiple Choice'];
+const FIELD_TYPES = ['Text', 'Notes', 'Number', 'Date', 'Yes/No', 'Pass/Fail', 'Multiple Choice', 'Photo'];
 const ATTACH_BUCKET = 'attachments';
 
 const STATUS_STYLE = {
@@ -50,6 +52,14 @@ function fmtBytes(n) {
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(0) + ' KB';
   return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+function titleFromFilename(name) {
+  return name.replace(/\.docx?$/i, '').replace(/[_-]+/g, ' ').trim();
+}
+async function extractWordText(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  return result.value.trim();
 }
 function Badge({ status }) {
   const s = STATUS_STYLE[status] || STATUS_STYLE['Draft'];
@@ -81,6 +91,7 @@ function mapDoc(r) {
 function mapTemplate(r) {
   return {
     id: r.id, name: r.name, category: r.category, department: r.department, fields: r.fields || [],
+    description: r.description || '', attachments: r.attachments || [],
     createdBy: r.created_by_name, createdAt: r.created_at, updatedBy: r.updated_by_name, updatedAt: r.updated_at,
   };
 }
@@ -97,7 +108,8 @@ const emptyForm = {
   revision: 'A', status: 'Draft', effectiveDate: todayISO(), expiryDate: '',
   content: '', attachments: []
 };
-const emptyTemplateForm = { id: null, name: '', category: 'Inspection Checklist', department: '', fields: [] };
+const emptyTemplateForm = { id: null, name: '', category: 'Inspection Checklist', department: '', fields: [], description: '', attachments: [] };
+
 
 export default function App() {
   const [authLoaded, setAuthLoaded] = useState(false);
@@ -119,6 +131,7 @@ export default function App() {
   const [templateForm, setTemplateForm] = useState(emptyTemplateForm);
   const [fillingTemplate, setFillingTemplate] = useState(null);
   const [removedAttachments, setRemovedAttachments] = useState([]); // paths to delete from storage
+  const [removedTemplateAttachments, setRemovedTemplateAttachments] = useState([]);
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('All');
   const [filterStatus, setFilterStatus] = useState('All');
@@ -369,16 +382,31 @@ export default function App() {
   }
 
   // ---------- Templates ----------
-  function startNewTemplate() { setTemplateForm({ ...emptyTemplateForm, id: null, fields: [] }); setView('templateForm'); }
-  function startEditTemplate(t) { setTemplateForm({ ...t }); setView('templateForm'); }
+  function startNewTemplate() { setTemplateForm({ ...emptyTemplateForm, id: null, fields: [], attachments: [] }); setRemovedTemplateAttachments([]); setView('templateForm'); }
+  function startEditTemplate(t) { setTemplateForm({ ...t, attachments: t.attachments || [] }); setRemovedTemplateAttachments([]); setView('templateForm'); }
   async function saveTemplate(e) {
     e.preventDefault();
     if (!templateForm.name.trim() || templateForm.fields.length === 0) return;
     setSaving(true); setSaveError(null);
     try {
+      for (const path of removedTemplateAttachments) {
+        await supabase.storage.from(ATTACH_BUCKET).remove([path]).catch(() => {});
+      }
+      const cleanedAttachments = [];
+      for (const a of (templateForm.attachments || [])) {
+        if (a.isNew && a.file) {
+          const path = `${uid('att')}-${a.file.name}`;
+          const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, a.file);
+          if (upErr) { setSaveError(`"${a.name}" didn't upload: ${upErr.message}`); continue; }
+          cleanedAttachments.push({ id: a.id, name: a.name, type: a.type, size: a.size, path });
+        } else {
+          cleanedAttachments.push({ id: a.id, name: a.name, type: a.type, size: a.size, path: a.path });
+        }
+      }
       const payload = {
         name: templateForm.name, category: templateForm.category, department: templateForm.department || null,
-        fields: templateForm.fields, updated_by_name: displayName, updated_at: new Date().toISOString(),
+        fields: templateForm.fields, description: templateForm.description || null, attachments: cleanedAttachments,
+        updated_by_name: displayName, updated_at: new Date().toISOString(),
       };
       if (templateForm.id) {
         const { error } = await supabase.from('templates').update(payload).eq('id', templateForm.id);
@@ -396,17 +424,39 @@ export default function App() {
     }
   }
   async function deleteTemplate(id) {
+    const t = templates.find(x => x.id === id);
     const { error } = await supabase.from('templates').delete().eq('id', id);
-    if (error) setSaveError(error.message); else refreshTemplates();
+    if (!error) {
+      for (const a of (t?.attachments || [])) {
+        if (a.path) await supabase.storage.from(ATTACH_BUCKET).remove([a.path]).catch(() => {});
+      }
+      await refreshTemplates();
+    } else {
+      setSaveError(error.message);
+    }
     setConfirmDeleteTemplate(null);
   }
   function startFill(t) { setFillingTemplate(t); setView('fillForm'); }
   async function submitFilledForm(values) {
     setSaving(true); setSaveError(null);
     try {
+      // Photo-type fields hold a raw File object until now — upload each one and
+      // swap it for a stored reference before the submission is saved.
+      const finalValues = {};
+      for (const f of fillingTemplate.fields) {
+        const v = values[f.id];
+        if (f.type === 'Photo' && v instanceof File) {
+          const path = `${uid('att')}-${v.name}`;
+          const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, v);
+          if (upErr) { setSaveError(`"${v.name}" didn't upload: ${upErr.message}`); continue; }
+          finalValues[f.id] = { id: uid('sp'), name: v.name, type: v.type, size: v.size, path };
+        } else if (v !== undefined) {
+          finalValues[f.id] = v;
+        }
+      }
       const { error } = await supabase.from('submissions').insert({
         template_id: fillingTemplate.id, template_name: fillingTemplate.name, category: fillingTemplate.category,
-        department: fillingTemplate.department, fields_snapshot: fillingTemplate.fields, values,
+        department: fillingTemplate.department, fields_snapshot: fillingTemplate.fields, values: finalValues,
         filled_by_name: displayName, filled_at: todayISO(),
       });
       if (error) throw error;
@@ -519,7 +569,8 @@ export default function App() {
 
         {view === 'templateForm' && canBuildTemplates && (
           <TemplateForm templateForm={templateForm} setTemplateForm={setTemplateForm} onCancel={() => setView('templates')}
-            onSubmit={saveTemplate} inputStyle={inputStyle} labelStyle={labelStyle} saving={saving} />
+            onSubmit={saveTemplate} onRemoveExisting={(path) => setRemovedTemplateAttachments(p => [...p, path])}
+            inputStyle={inputStyle} labelStyle={labelStyle} saving={saving} />
         )}
 
         {view === 'fillForm' && fillingTemplate && (
@@ -538,40 +589,43 @@ export default function App() {
 
       {activeDoc && (
         <Modal onClose={() => setActiveDoc(null)}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-            <div>
-              <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeDoc.type} · REV. {activeDoc.revision || 'A'}</div>
-              <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, margin: 0 }}>{activeDoc.title}</h2>
-            </div>
-            <Badge status={effectiveStatus(activeDoc)} />
-          </div>
-          <div style={{ display: 'flex', gap: 24, margin: '18px 0', fontSize: 13, color: C.dim, flexWrap: 'wrap' }}>
-            <span><strong style={{ color: C.text }}>Department:</strong> {activeDoc.department || '—'}</span>
-            <span><strong style={{ color: C.text }}>Owner:</strong> {activeDoc.owner || '—'}</span>
-            <span><strong style={{ color: C.text }}>Effective:</strong> {activeDoc.effectiveDate || '—'}</span>
-            <span><strong style={{ color: C.text }}>Expires:</strong> {activeDoc.expiryDate || '—'}</span>
-          </div>
-          {(activeDoc.createdBy || activeDoc.updatedBy) && (
-            <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 14 }}>
-              {activeDoc.createdBy && <>Created by {activeDoc.createdBy}{activeDoc.createdAt ? ` on ${activeDoc.createdAt}` : ''}. </>}
-              {activeDoc.updatedBy && <>Last edited by {activeDoc.updatedBy}{activeDoc.updatedAt ? ` on ${activeDoc.updatedAt}` : ''}.</>}
-            </div>
-          )}
-          <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: 16, fontSize: 14, lineHeight: 1.7, whiteSpace: 'pre-wrap', minHeight: 100 }}>
-            {activeDoc.content ? activeDoc.content : <span style={{ color: C.faint }}>No content added yet.</span>}
-          </div>
-          {(activeDoc.attachments && activeDoc.attachments.length > 0) && (
-            <div style={{ marginTop: 20 }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 10 }}>Attachments ({activeDoc.attachments.length})</div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
-                {activeDoc.attachments.map(a => (
-                  <AttachmentTile key={a.id} meta={a} url={attachmentUrlCache[a.id]} isLoading={!!loadingAttachments[a.id]} onLoad={() => loadAttachment(a)} />
-                ))}
+          <div id="print-area">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+              <div>
+                <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeDoc.type} · REV. {activeDoc.revision || 'A'}</div>
+                <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, margin: 0 }}>{activeDoc.title}</h2>
               </div>
+              <Badge status={effectiveStatus(activeDoc)} />
             </div>
-          )}
+            <div style={{ display: 'flex', gap: 24, margin: '18px 0', fontSize: 13, color: C.dim, flexWrap: 'wrap' }}>
+              <span><strong style={{ color: C.text }}>Department:</strong> {activeDoc.department || '—'}</span>
+              <span><strong style={{ color: C.text }}>Owner:</strong> {activeDoc.owner || '—'}</span>
+              <span><strong style={{ color: C.text }}>Effective:</strong> {activeDoc.effectiveDate || '—'}</span>
+              <span><strong style={{ color: C.text }}>Expires:</strong> {activeDoc.expiryDate || '—'}</span>
+            </div>
+            {(activeDoc.createdBy || activeDoc.updatedBy) && (
+              <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 14 }}>
+                {activeDoc.createdBy && <>Created by {activeDoc.createdBy}{activeDoc.createdAt ? ` on ${activeDoc.createdAt}` : ''}. </>}
+                {activeDoc.updatedBy && <>Last edited by {activeDoc.updatedBy}{activeDoc.updatedAt ? ` on ${activeDoc.updatedAt}` : ''}.</>}
+              </div>
+            )}
+            <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: 16, fontSize: 14, lineHeight: 1.7, whiteSpace: 'pre-wrap', minHeight: 100 }}>
+              {activeDoc.content ? activeDoc.content : <span style={{ color: C.faint }}>No content added yet.</span>}
+            </div>
+            {(activeDoc.attachments && activeDoc.attachments.length > 0) && (
+              <div style={{ marginTop: 20 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 10 }}>Attachments ({activeDoc.attachments.length})</div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
+                  {activeDoc.attachments.map(a => (
+                    <AttachmentTile key={a.id} meta={a} url={attachmentUrlCache[a.id]} isLoading={!!loadingAttachments[a.id]} onLoad={() => loadAttachment(a)} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
           <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
             {canBuildDocuments && <button onClick={() => { setActiveDoc(null); startEdit(activeDoc); }} style={btnPrimary(C)}><Pencil size={14} /> Edit Document</button>}
+            <button onClick={() => window.print()} style={btnGhost(C)}><Printer size={14} /> Export PDF</button>
             <button onClick={() => setActiveDoc(null)} style={btnGhost(C)}>Close</button>
           </div>
         </Modal>
@@ -579,25 +633,34 @@ export default function App() {
 
       {activeSubmission && (
         <Modal onClose={() => setActiveSubmission(null)}>
-          <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeSubmission.category}</div>
-          <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 21, margin: '0 0 6px' }}>{activeSubmission.templateName}</h2>
-          <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 18 }}>
-            Filled out by <strong style={{ color: C.text }}>{activeSubmission.filledBy}</strong> on {activeSubmission.filledAt}
-            {activeSubmission.department ? ` · ${activeSubmission.department}` : ''}
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {(activeSubmission.fieldsSnapshot || []).map(f => (
-              <div key={f.id} style={{ borderBottom: `1px solid ${C.border}`, paddingBottom: 10 }}>
-                <div style={{ fontSize: 11.5, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 5 }}>{f.label}</div>
-                {f.type === 'Pass/Fail' ? (
-                  <PassFailBadge value={activeSubmission.values[f.id]} />
-                ) : (
-                  <div style={{ fontSize: 14, color: C.text, whiteSpace: 'pre-wrap' }}>{activeSubmission.values[f.id] || <span style={{ color: C.faint }}>—</span>}</div>
-                )}
-              </div>
-            ))}
+          <div id="print-area">
+            <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeSubmission.category}</div>
+            <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 21, margin: '0 0 6px' }}>{activeSubmission.templateName}</h2>
+            <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 18 }}>
+              Filled out by <strong style={{ color: C.text }}>{activeSubmission.filledBy}</strong> on {activeSubmission.filledAt}
+              {activeSubmission.department ? ` · ${activeSubmission.department}` : ''}
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {(activeSubmission.fieldsSnapshot || []).map(f => (
+                <div key={f.id} style={{ borderBottom: `1px solid ${C.border}`, paddingBottom: 10 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 5 }}>{f.label}</div>
+                  {f.type === 'Pass/Fail' ? (
+                    <PassFailBadge value={activeSubmission.values[f.id]} />
+                  ) : f.type === 'Photo' ? (
+                    activeSubmission.values[f.id]?.path ? (
+                      <div style={{ maxWidth: 160 }}>
+                        <AttachmentTile meta={activeSubmission.values[f.id]} url={attachmentUrlCache[activeSubmission.values[f.id].id]} isLoading={!!loadingAttachments[activeSubmission.values[f.id].id]} onLoad={() => loadAttachment(activeSubmission.values[f.id])} />
+                      </div>
+                    ) : <span style={{ color: C.faint, fontSize: 14 }}>—</span>
+                  ) : (
+                    <div style={{ fontSize: 14, color: C.text, whiteSpace: 'pre-wrap' }}>{activeSubmission.values[f.id] || <span style={{ color: C.faint }}>—</span>}</div>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 10, marginTop: 22 }}>
+            <button onClick={() => window.print()} style={btnGhost(C)}><Printer size={14} /> Export PDF</button>
             <button onClick={() => setActiveSubmission(null)} style={btnGhost(C)}>Close</button>
           </div>
         </Modal>
@@ -978,7 +1041,10 @@ function DocumentsList({ filtered, search, setSearch, filterType, setFilterType,
 function DocumentForm({ form, setForm, onCancel, onSubmit, onRemoveExisting, inputStyle, labelStyle, saving }) {
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const [fileError, setFileError] = useState(null);
+  const [wordError, setWordError] = useState(null);
+  const [importing, setImporting] = useState(false);
   const fileInputRef = useRef(null);
+  const wordInputRef = useRef(null);
   function handleFiles(e) {
     const files = Array.from(e.target.files || []);
     setFileError(null);
@@ -992,9 +1058,30 @@ function DocumentForm({ form, setForm, onCancel, onSubmit, onRemoveExisting, inp
     setForm(f => ({ ...f, attachments: (f.attachments || []).filter(a => a.id !== att.id) }));
     if (!att.isNew && att.path) onRemoveExisting(att.path);
   }
+  async function handleWordFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setWordError(null); setImporting(true);
+    try {
+      const text = await extractWordText(file);
+      setForm(f => ({ ...f, title: f.title || titleFromFilename(file.name), content: text }));
+    } catch (err) {
+      setWordError('Could not read that file. Make sure it\'s a .docx Word document.');
+    } finally {
+      setImporting(false);
+      if (wordInputRef.current) wordInputRef.current.value = '';
+    }
+  }
   return (
     <div style={{ maxWidth: 640 }}>
       <PageHeader title={form.id ? 'Edit Document' : 'New Document'} subtitle="Fields marked with an asterisk are required." />
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <button type="button" onClick={() => wordInputRef.current && wordInputRef.current.click()} disabled={importing} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13 }}>
+          {importing ? <Loader2 size={14} /> : <Upload size={14} />} {importing ? 'Reading file…' : 'Import from Word (.docx)'}
+        </button>
+        <input ref={wordInputRef} type="file" accept=".docx" onChange={handleWordFile} style={{ display: 'none' }} />
+        {wordError && <span style={{ color: C.red, fontSize: 12 }}>{wordError}</span>}
+      </div>
       <form onSubmit={onSubmit} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 24 }}>
         <div style={{ marginBottom: 16 }}><label style={labelStyle}>Title *</label>
           <input required style={inputStyle} value={form.title} onChange={e => set('title', e.target.value)} placeholder="e.g. Weld Inspection Checklist — Line 3" /></div>
@@ -1078,8 +1165,14 @@ function TemplatesList({ templates, isAdmin, canBuild, onNew, onEdit, onDelete, 
 }
 
 // ================= Template builder =================
-function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, inputStyle, labelStyle, saving }) {
+function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRemoveExisting, inputStyle, labelStyle, saving }) {
   const set = (k, v) => setTemplateForm(f => ({ ...f, [k]: v }));
+  const [fileError, setFileError] = useState(null);
+  const [wordError, setWordError] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const fileInputRef = useRef(null);
+  const wordInputRef = useRef(null);
+
   function addField() { setTemplateForm(f => ({ ...f, fields: [...f.fields, { id: uid('f'), label: '', type: 'Text', options: '', required: true }] })); }
   function updateField(id, patch) { setTemplateForm(f => ({ ...f, fields: f.fields.map(fl => fl.id === id ? { ...fl, ...patch } : fl) })); }
   function removeField(id) { setTemplateForm(f => ({ ...f, fields: f.fields.filter(fl => fl.id !== id) })); }
@@ -1093,21 +1186,78 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, input
       return { ...f, fields: next };
     });
   }
+  function handleFiles(e) {
+    const files = Array.from(e.target.files || []);
+    setFileError(null);
+    files.forEach(file => {
+      if (file.size > MAX_FILE_BYTES) { setFileError(`"${file.name}" is too large (limit ${fmtBytes(MAX_FILE_BYTES)}).`); return; }
+      setTemplateForm(f => ({ ...f, attachments: [...(f.attachments || []), { id: uid('a'), name: file.name, type: file.type, size: file.size, file, isNew: true }] }));
+    });
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
+  function removeAttachment(att) {
+    setTemplateForm(f => ({ ...f, attachments: (f.attachments || []).filter(a => a.id !== att.id) }));
+    if (!att.isNew && att.path) onRemoveExisting(att.path);
+  }
+  async function handleWordFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setWordError(null); setImporting(true);
+    try {
+      const text = await extractWordText(file);
+      setTemplateForm(f => ({ ...f, name: f.name || titleFromFilename(file.name), description: text }));
+    } catch (err) {
+      setWordError('Could not read that file. Make sure it\'s a .docx Word document.');
+    } finally {
+      setImporting(false);
+      if (wordInputRef.current) wordInputRef.current.value = '';
+    }
+  }
+
   const canSubmit = templateForm.name.trim() && templateForm.fields.length > 0 && templateForm.fields.every(f => f.label.trim());
 
   return (
     <div style={{ maxWidth: 680 }}>
       <PageHeader title={templateForm.id ? 'Edit Template' : 'New Template'} subtitle="Define the fields once — everyone will fill out this same form going forward." />
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <button type="button" onClick={() => wordInputRef.current && wordInputRef.current.click()} disabled={importing} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13 }}>
+          {importing ? <Loader2 size={14} /> : <Upload size={14} />} {importing ? 'Reading file…' : 'Import from Word (.docx)'}
+        </button>
+        <input ref={wordInputRef} type="file" accept=".docx" onChange={handleWordFile} style={{ display: 'none' }} />
+        {wordError && <span style={{ color: C.red, fontSize: 12 }}>{wordError}</span>}
+        <span style={{ fontSize: 11.5, color: C.faint }}>Fills in the name and description below — add your fields manually after.</span>
+      </div>
       <form onSubmit={onSubmit} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 24 }}>
         <div style={{ marginBottom: 16 }}>
           <label style={labelStyle}>Template Name *</label>
           <input required style={inputStyle} value={templateForm.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Daily Rack Install Inspection" />
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 22 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
           <div><label style={labelStyle}>Category</label>
             <select style={inputStyle} value={templateForm.category} onChange={e => set('category', e.target.value)}>{TYPE_OPTIONS.map(t => <option key={t}>{t}</option>)}</select></div>
           <div><label style={labelStyle}>Department</label>
             <input style={inputStyle} value={templateForm.department} onChange={e => set('department', e.target.value)} placeholder="e.g. Assembly" /></div>
+        </div>
+        <div style={{ marginBottom: 22 }}>
+          <label style={labelStyle}>Description / Instructions</label>
+          <textarea style={{ ...inputStyle, minHeight: 100, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.6 }} value={templateForm.description || ''} onChange={e => set('description', e.target.value)} placeholder="Context or instructions shown before the fields when someone fills this out..." />
+        </div>
+
+        <div style={{ marginBottom: 22 }}>
+          <label style={labelStyle}>Reference Attachments</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: (templateForm.attachments || []).length > 0 ? 12 : 0 }}>
+            {(templateForm.attachments || []).map(a => (
+              <div key={a.id} style={{ display: 'flex', alignItems: 'center', gap: 8, border: `1px solid ${C.border}`, borderRadius: 6, padding: '7px 10px', fontSize: 12.5, background: C.bg }}>
+                {(a.type || '').startsWith('image/') ? <ImageIcon size={14} color={C.dim} /> : <FileIcon size={14} color={C.dim} />}
+                <span style={{ maxWidth: 140, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{a.name}</span>
+                <span style={{ color: C.faint }}>{fmtBytes(a.size)}</span>
+                <button type="button" onClick={() => removeAttachment(a)} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.faint, display: 'flex' }}><X size={13} /></button>
+              </div>
+            ))}
+          </div>
+          <button type="button" onClick={() => fileInputRef.current && fileInputRef.current.click()} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13 }}><Paperclip size={14} /> Add Photo or File</button>
+          <input ref={fileInputRef} type="file" multiple accept="image/*,.pdf,.doc,.docx,.xls,.xlsx" onChange={handleFiles} style={{ display: 'none' }} />
+          {fileError && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{fileError}</div>}
         </div>
 
         <label style={labelStyle}>Fields</label>
@@ -1130,6 +1280,9 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, input
               {f.type === 'Multiple Choice' && (
                 <input style={{ ...inputStyle, background: '#fff' }} value={f.options} onChange={e => updateField(f.id, { options: e.target.value })} placeholder="Options, separated by commas (e.g. Line 1, Line 2, Line 3)" />
               )}
+              {f.type === 'Photo' && (
+                <div style={{ fontSize: 12, color: C.faint, display: 'flex', alignItems: 'center', gap: 6 }}><Camera size={13} /> Whoever fills this out will be asked to attach a photo here.</div>
+              )}
             </div>
           ))}
         </div>
@@ -1150,10 +1303,22 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, input
 function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving, sessionName }) {
   const [values, setValues] = useState({});
   const [errors, setErrors] = useState([]);
+  const [refCache, setRefCache] = useState({});
+  const [refLoading, setRefLoading] = useState({});
   function setVal(id, v) { setValues(prev => ({ ...prev, [id]: v })); }
+  async function loadRef(att) {
+    if (refCache[att.id] || refLoading[att.id] || !att.path) return;
+    setRefLoading(s => ({ ...s, [att.id]: true }));
+    try {
+      const { data, error } = await supabase.storage.from(ATTACH_BUCKET).download(att.path);
+      if (!error && data) setRefCache(c => ({ ...c, [att.id]: URL.createObjectURL(data) }));
+    } finally {
+      setRefLoading(s => ({ ...s, [att.id]: false }));
+    }
+  }
   function handleSubmit(e) {
     e.preventDefault();
-    const missing = template.fields.filter(f => f.required && !(values[f.id] || '').toString().trim());
+    const missing = template.fields.filter(f => f.required && (f.type === 'Photo' ? !values[f.id] : !(values[f.id] || '').toString().trim()));
     if (missing.length > 0) { setErrors(missing.map(f => f.label)); return; }
     setErrors([]);
     onSubmit(values);
@@ -1161,6 +1326,20 @@ function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving
   return (
     <div style={{ maxWidth: 640 }}>
       <PageHeader title={template.name} subtitle={`${template.category}${template.department ? ' · ' + template.department : ''} — filling out as ${sessionName}`} />
+
+      {(template.description || (template.attachments && template.attachments.length > 0)) && (
+        <div style={{ background: C.blueBg, border: `1px solid ${C.border}`, borderRadius: 8, padding: 18, marginBottom: 18 }}>
+          {template.description && <div style={{ fontSize: 13.5, color: C.text, whiteSpace: 'pre-wrap', lineHeight: 1.6, marginBottom: (template.attachments || []).length > 0 ? 14 : 0 }}>{template.description}</div>}
+          {(template.attachments && template.attachments.length > 0) && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 10 }}>
+              {template.attachments.map(a => (
+                <AttachmentTile key={a.id} meta={a} url={refCache[a.id]} isLoading={!!refLoading[a.id]} onLoad={() => loadRef(a)} />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 24 }}>
         {errors.length > 0 && (
           <div style={{ background: C.redBg, color: C.red, borderRadius: 6, padding: '10px 14px', fontSize: 13, marginBottom: 18 }}>
@@ -1182,6 +1361,16 @@ function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving
                   <option value="">Select…</option>
                   {(f.options || '').split(',').map(o => o.trim()).filter(Boolean).map(o => <option key={o}>{o}</option>)}
                 </select>
+              )}
+              {f.type === 'Photo' && (
+                <div>
+                  <input type="file" accept="image/*" capture="environment" onChange={e => setVal(f.id, e.target.files?.[0] || null)} style={inputStyle} />
+                  {values[f.id] && (
+                    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.dim }}>
+                      <Camera size={13} /> {values[f.id].name} ({fmtBytes(values[f.id].size)})
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           ))}
@@ -1284,7 +1473,7 @@ function EmptyState({ title, body, onNew, canCreate = true }) {
 function Modal({ children, onClose, narrow }) {
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(11,32,51,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 20 }} onClick={onClose}>
-      <div style={{ background: '#fff', borderRadius: 10, padding: 28, width: '100%', maxWidth: narrow ? 400 : 620, maxHeight: '84vh', overflow: 'auto', position: 'relative', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
+      <div className="modal-inner" style={{ background: '#fff', borderRadius: 10, padding: 28, width: '100%', maxWidth: narrow ? 400 : 620, maxHeight: '84vh', overflow: 'auto', position: 'relative', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
         <button onClick={onClose} style={{ position: 'absolute', top: 16, right: 16, border: 'none', background: 'none', cursor: 'pointer', color: C.faint }}><X size={18} /></button>
         {children}
       </div>
