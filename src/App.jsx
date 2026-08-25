@@ -25,6 +25,20 @@ const TYPE_OPTIONS = ['SOP', 'JSA', 'OPL', 'Inspection Checklist', 'Work Instruc
 const STATUS_OPTIONS = ['Draft', 'Pending Approval', 'Approved'];
 const MAX_FILE_BYTES = 20 * 1024 * 1024; // Supabase free tier allows larger files than the old artifact limit
 const FIELD_TYPES = ['Text', 'Notes', 'Number', 'Date', 'Yes/No', 'Pass/Fail', 'Multiple Choice', 'Photo'];
+// Only fields with a small, fixed set of possible answers can be used as a trigger
+// for another field's visibility — free text doesn't make sense to branch on.
+const CONDITIONABLE_TYPES = ['Yes/No', 'Pass/Fail', 'Multiple Choice'];
+function optionsForField(field) {
+  if (!field) return [];
+  if (field.type === 'Yes/No') return ['Yes', 'No'];
+  if (field.type === 'Pass/Fail') return ['Pass', 'Fail'];
+  if (field.type === 'Multiple Choice') return (field.options || '').split(',').map(o => o.trim()).filter(Boolean);
+  return [];
+}
+function fieldVisible(field, values) {
+  if (!field.condition || !field.condition.fieldId) return true;
+  return String(values[field.condition.fieldId] || '') === field.condition.equals;
+}
 const ATTACH_BUCKET = 'attachments';
 
 const STATUS_STYLE = {
@@ -641,7 +655,7 @@ export default function App() {
               {activeSubmission.department ? ` · ${activeSubmission.department}` : ''}
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {(activeSubmission.fieldsSnapshot || []).map(f => (
+              {(activeSubmission.fieldsSnapshot || []).filter(f => fieldVisible(f, activeSubmission.values)).map(f => (
                 <div key={f.id} style={{ borderBottom: `1px solid ${C.border}`, paddingBottom: 10 }}>
                   <div style={{ fontSize: 11.5, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 5 }}>{f.label}</div>
                   {f.type === 'Pass/Fail' ? (
@@ -1173,9 +1187,16 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
   const fileInputRef = useRef(null);
   const wordInputRef = useRef(null);
 
-  function addField() { setTemplateForm(f => ({ ...f, fields: [...f.fields, { id: uid('f'), label: '', type: 'Text', options: '', required: true }] })); }
+  function addField() { setTemplateForm(f => ({ ...f, fields: [...f.fields, { id: uid('f'), label: '', type: 'Text', options: '', required: true, condition: null }] })); }
   function updateField(id, patch) { setTemplateForm(f => ({ ...f, fields: f.fields.map(fl => fl.id === id ? { ...fl, ...patch } : fl) })); }
-  function removeField(id) { setTemplateForm(f => ({ ...f, fields: f.fields.filter(fl => fl.id !== id) })); }
+  function removeField(id) {
+    setTemplateForm(f => ({
+      ...f,
+      fields: f.fields
+        .filter(fl => fl.id !== id)
+        .map(fl => fl.condition && fl.condition.fieldId === id ? { ...fl, condition: null } : fl),
+    }));
+  }
   function moveField(id, dir) {
     setTemplateForm(f => {
       const idx = f.fields.findIndex(fl => fl.id === id);
@@ -1263,28 +1284,68 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
         <label style={labelStyle}>Fields</label>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
           {templateForm.fields.length === 0 && <div style={{ fontSize: 13, color: C.faint, padding: '12px 2px' }}>No fields yet — add the first one below.</div>}
-          {templateForm.fields.map((f) => (
-            <div key={f.id} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 14, background: C.bg }}>
-              <div style={{ display: 'flex', gap: 10, marginBottom: f.type === 'Multiple Choice' ? 10 : 0, flexWrap: 'wrap' }}>
-                <input style={{ ...inputStyle, flex: '2 1 160px', background: '#fff' }} value={f.label} onChange={e => updateField(f.id, { label: e.target.value })} placeholder="Field label, e.g. Torque spec met?" />
-                <select style={{ ...inputStyle, flex: '1 1 130px', background: '#fff' }} value={f.type} onChange={e => updateField(f.id, { type: e.target.value })}>{FIELD_TYPES.map(ft => <option key={ft}>{ft}</option>)}</select>
-                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.dim, whiteSpace: 'nowrap' }}>
-                  <input type="checkbox" checked={f.required} onChange={e => updateField(f.id, { required: e.target.checked })} /> Required
-                </label>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  <IconBtn onClick={() => moveField(f.id, -1)} title="Move up"><ArrowUp size={13} /></IconBtn>
-                  <IconBtn onClick={() => moveField(f.id, 1)} title="Move down"><ArrowDown size={13} /></IconBtn>
-                  <IconBtn onClick={() => removeField(f.id)} title="Remove field"><X size={14} /></IconBtn>
+          {templateForm.fields.map((f, i) => {
+            const eligible = templateForm.fields.slice(0, i).filter(other => CONDITIONABLE_TYPES.includes(other.type) && other.label.trim());
+            const conditionField = f.condition ? templateForm.fields.find(x => x.id === f.condition.fieldId) : null;
+            return (
+              <div key={f.id} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 14, background: C.bg }}>
+                <div style={{ display: 'flex', gap: 10, marginBottom: f.type === 'Multiple Choice' ? 10 : 0, flexWrap: 'wrap' }}>
+                  <input style={{ ...inputStyle, flex: '2 1 160px', background: '#fff' }} value={f.label} onChange={e => updateField(f.id, { label: e.target.value })} placeholder="Field label, e.g. Torque spec met?" />
+                  <select style={{ ...inputStyle, flex: '1 1 130px', background: '#fff' }} value={f.type} onChange={e => updateField(f.id, { type: e.target.value })}>{FIELD_TYPES.map(ft => <option key={ft}>{ft}</option>)}</select>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.dim, whiteSpace: 'nowrap' }}>
+                    <input type="checkbox" checked={f.required} onChange={e => updateField(f.id, { required: e.target.checked })} /> Required
+                  </label>
+                  <div style={{ display: 'flex', gap: 4 }}>
+                    <IconBtn onClick={() => moveField(f.id, -1)} title="Move up"><ArrowUp size={13} /></IconBtn>
+                    <IconBtn onClick={() => moveField(f.id, 1)} title="Move down"><ArrowDown size={13} /></IconBtn>
+                    <IconBtn onClick={() => removeField(f.id)} title="Remove field"><X size={14} /></IconBtn>
+                  </div>
+                </div>
+                {f.type === 'Multiple Choice' && (
+                  <input style={{ ...inputStyle, background: '#fff', marginBottom: 10 }} value={f.options} onChange={e => updateField(f.id, { options: e.target.value })} placeholder="Options, separated by commas (e.g. Line 1, Line 2, Line 3)" />
+                )}
+                {f.type === 'Photo' && (
+                  <div style={{ fontSize: 12, color: C.faint, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Camera size={13} /> Whoever fills this out will be asked to attach a photo here.</div>
+                )}
+
+                <div style={{ paddingTop: 10, borderTop: `1px dashed ${C.borderStrong}` }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.dim, cursor: eligible.length === 0 ? 'default' : 'pointer' }}>
+                    <input
+                      type="checkbox" checked={!!f.condition} disabled={eligible.length === 0}
+                      onChange={e => updateField(f.id, { condition: e.target.checked ? { fieldId: '', equals: '' } : null })}
+                    />
+                    Only show this field conditionally
+                  </label>
+                  {eligible.length === 0 && (
+                    <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>Add a Yes/No, Pass/Fail, or Multiple Choice field above this one to make it conditional.</div>
+                  )}
+                  {f.condition && (
+                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <span style={{ fontSize: 12, color: C.dim }}>Show when</span>
+                      <select
+                        style={{ ...inputStyle, background: '#fff', flex: '1 1 150px', padding: '7px 10px' }}
+                        value={f.condition.fieldId}
+                        onChange={e => updateField(f.id, { condition: { fieldId: e.target.value, equals: '' } })}
+                      >
+                        <option value="">Choose a field…</option>
+                        {eligible.map(ef => <option key={ef.id} value={ef.id}>{ef.label}</option>)}
+                      </select>
+                      <span style={{ fontSize: 12, color: C.dim }}>is</span>
+                      <select
+                        style={{ ...inputStyle, background: '#fff', flex: '1 1 130px', padding: '7px 10px' }}
+                        value={f.condition.equals}
+                        disabled={!f.condition.fieldId}
+                        onChange={e => updateField(f.id, { condition: { ...f.condition, equals: e.target.value } })}
+                      >
+                        <option value="">Select…</option>
+                        {optionsForField(conditionField).map(o => <option key={o}>{o}</option>)}
+                      </select>
+                    </div>
+                  )}
                 </div>
               </div>
-              {f.type === 'Multiple Choice' && (
-                <input style={{ ...inputStyle, background: '#fff' }} value={f.options} onChange={e => updateField(f.id, { options: e.target.value })} placeholder="Options, separated by commas (e.g. Line 1, Line 2, Line 3)" />
-              )}
-              {f.type === 'Photo' && (
-                <div style={{ fontSize: 12, color: C.faint, display: 'flex', alignItems: 'center', gap: 6 }}><Camera size={13} /> Whoever fills this out will be asked to attach a photo here.</div>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
         <button type="button" onClick={addField} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13, marginBottom: 22 }}><PlusCircle size={14} /> Add Field</button>
 
@@ -1318,10 +1379,16 @@ function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving
   }
   function handleSubmit(e) {
     e.preventDefault();
-    const missing = template.fields.filter(f => f.required && (f.type === 'Photo' ? !values[f.id] : !(values[f.id] || '').toString().trim()));
+    const visibleFields = template.fields.filter(f => fieldVisible(f, values));
+    const missing = visibleFields.filter(f => f.required && (f.type === 'Photo' ? !values[f.id] : !(values[f.id] || '').toString().trim()));
     if (missing.length > 0) { setErrors(missing.map(f => f.label)); return; }
     setErrors([]);
-    onSubmit(values);
+    // Drop any leftover value for a field that isn't currently visible — e.g. someone
+    // answered a follow-up question, then changed the trigger answer back.
+    const visibleIds = new Set(visibleFields.map(f => f.id));
+    const trimmedValues = {};
+    Object.keys(values).forEach(k => { if (visibleIds.has(k)) trimmedValues[k] = values[k]; });
+    onSubmit(trimmedValues);
   }
   return (
     <div style={{ maxWidth: 640 }}>
@@ -1347,7 +1414,7 @@ function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving
           </div>
         )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          {template.fields.map(f => (
+          {template.fields.filter(f => fieldVisible(f, values)).map(f => (
             <div key={f.id}>
               <label style={labelStyle}>{f.label}{f.required && ' *'}</label>
               {f.type === 'Text' && <input style={inputStyle} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)} />}
