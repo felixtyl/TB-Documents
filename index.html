@@ -10,6 +10,16 @@
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500&display=swap"
       rel="stylesheet"
     />
+    <style>
+      @media print {
+        body * { visibility: hidden; }
+        #print-area, #print-area * { visibility: visible; }
+        #print-area {
+          position: absolute; left: 0; top: 0; width: 100%; padding: 24px;
+        }
+        .modal-inner { max-height: none !important; overflow: visible !important; box-shadow: none !important; }
+      }
+    </style>
   </head>
   <body style="margin:0;">
     <div id="root"></div>
