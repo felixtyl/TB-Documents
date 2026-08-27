@@ -1677,7 +1677,7 @@ function EmptyState({ title, body, onNew, canCreate = true }) {
 }
 function Modal({ children, onClose, narrow }) {
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(11,32,51,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 20 }} onClick={onClose}>
+    <div className="modal-backdrop" style={{ position: 'fixed', inset: 0, background: 'rgba(11,32,51,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 20 }} onClick={onClose}>
       <div className="modal-inner" style={{ background: '#fff', borderRadius: 10, padding: 28, width: '100%', maxWidth: narrow ? 400 : 660, maxHeight: '84vh', overflow: 'auto', position: 'relative', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
         <button onClick={onClose} style={{ position: 'absolute', top: 16, right: 16, border: 'none', background: 'none', cursor: 'pointer', color: C.faint }}><X size={18} /></button>
         {children}

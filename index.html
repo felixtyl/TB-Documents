@@ -14,10 +14,33 @@
       @media print {
         body * { visibility: hidden; }
         #print-area, #print-area * { visibility: visible; }
-        #print-area {
-          position: absolute; left: 0; top: 0; width: 100%; padding: 24px;
+
+        /* The modal is normally centered on screen via fixed positioning and
+           flexbox. Left as-is for print, that centering pushes the content
+           down by however much empty space is left above/below it on the
+           page. Flatten it back into normal document flow instead. */
+        .modal-backdrop {
+          position: static !important;
+          display: block !important;
+          background: none !important;
+          padding: 0 !important;
         }
-        .modal-inner { max-height: none !important; overflow: visible !important; box-shadow: none !important; }
+        .modal-inner {
+          position: static !important;
+          max-width: none !important;
+          max-height: none !important;
+          overflow: visible !important;
+          box-shadow: none !important;
+          border-radius: 0 !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          width: auto !important;
+        }
+        #print-area {
+          position: static !important;
+          width: auto !important;
+          padding: 0 !important;
+        }
       }
     </style>
   </head>
