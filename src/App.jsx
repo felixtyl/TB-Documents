@@ -9,7 +9,7 @@ import {
   Paperclip, Image as ImageIcon, Download, File as FileIcon, Loader2,
   Users, LogOut, ShieldCheck, UserPlus, ClipboardList,
   ClipboardCheck, ArrowUp, ArrowDown, ListChecks, Ban, ShieldOff,
-  Upload, Printer, Camera
+  Upload, Printer, Camera, FolderPlus, Layers, Copy
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import { supabase } from './supabaseClient';
@@ -23,22 +23,9 @@ const C = {
 
 const TYPE_OPTIONS = ['SOP', 'JSA', 'OPL', 'Inspection Checklist', 'Work Instruction', 'Training Record', 'Other'];
 const STATUS_OPTIONS = ['Draft', 'Pending Approval', 'Approved'];
-const MAX_FILE_BYTES = 20 * 1024 * 1024; // Supabase free tier allows larger files than the old artifact limit
+const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const FIELD_TYPES = ['Text', 'Notes', 'Number', 'Date', 'Yes/No', 'Pass/Fail', 'Multiple Choice', 'Photo'];
-// Only fields with a small, fixed set of possible answers can be used as a trigger
-// for another field's visibility — free text doesn't make sense to branch on.
 const CONDITIONABLE_TYPES = ['Yes/No', 'Pass/Fail', 'Multiple Choice'];
-function optionsForField(field) {
-  if (!field) return [];
-  if (field.type === 'Yes/No') return ['Yes', 'No'];
-  if (field.type === 'Pass/Fail') return ['Pass', 'Fail'];
-  if (field.type === 'Multiple Choice') return (field.options || '').split(',').map(o => o.trim()).filter(Boolean);
-  return [];
-}
-function fieldVisible(field, values) {
-  if (!field.condition || !field.condition.fieldId) return true;
-  return String(values[field.condition.fieldId] || '') === field.condition.equals;
-}
 const ATTACH_BUCKET = 'attachments';
 
 const STATUS_STYLE = {
@@ -75,6 +62,32 @@ async function extractWordText(file) {
   const result = await mammoth.extractRawText({ arrayBuffer });
   return result.value.trim();
 }
+function optionsForField(field) {
+  if (!field) return [];
+  if (field.type === 'Yes/No') return ['Yes', 'No'];
+  if (field.type === 'Pass/Fail') return ['Pass', 'Fail'];
+  if (field.type === 'Multiple Choice') return (field.options || '').split(',').map(o => o.trim()).filter(Boolean);
+  return [];
+}
+function fieldVisible(field, scopedValues) {
+  if (!field.condition || !field.condition.fieldId) return true;
+  return String(scopedValues[field.condition.fieldId] || '') === field.condition.equals;
+}
+// Builds a human-readable submission title from a template's titleTemplate string,
+// e.g. "{{Building Number}} - {{Location}}" -> "12 - Brandon". Only pulls from
+// non-repeating fields, since a repeating section can have many/no rows.
+function interpolateTitle(template, values) {
+  if (!template.titleTemplate || !template.titleTemplate.trim()) return '';
+  const lookup = {};
+  (template.sections || []).forEach(s => {
+    if (!s.repeating) s.fields.forEach(f => { lookup[f.label.trim().toLowerCase()] = values[f.id]; });
+  });
+  let result = template.titleTemplate.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (match, label) => {
+    const v = lookup[label.trim().toLowerCase()];
+    return (v !== undefined && v !== null && v !== '') ? String(v) : '';
+  });
+  return result.replace(/\s{2,}/g, ' ').replace(/^[\s\-–—]+|[\s\-–—]+$/g, '').trim();
+}
 function Badge({ status }) {
   const s = STATUS_STYLE[status] || STATUS_STYLE['Draft'];
   const Icon = s.icon;
@@ -103,16 +116,26 @@ function mapDoc(r) {
   };
 }
 function mapTemplate(r) {
+  let sections = r.sections;
+  if (!sections || sections.length === 0) {
+    // Backward compatibility with templates saved before sections existed.
+    sections = (r.fields && r.fields.length > 0) ? [{ id: 'legacy', title: 'Fields', repeating: false, fields: r.fields }] : [];
+  }
   return {
-    id: r.id, name: r.name, category: r.category, department: r.department, fields: r.fields || [],
-    description: r.description || '', attachments: r.attachments || [],
+    id: r.id, name: r.name, category: r.category, department: r.department, sections,
+    titleTemplate: r.title_template || '', description: r.description || '', attachments: r.attachments || [],
     createdBy: r.created_by_name, createdAt: r.created_at, updatedBy: r.updated_by_name, updatedAt: r.updated_at,
   };
 }
 function mapSubmission(r) {
+  let sectionsSnapshot = r.sections_snapshot;
+  if (!sectionsSnapshot || sectionsSnapshot.length === 0) {
+    sectionsSnapshot = (r.fields_snapshot && r.fields_snapshot.length > 0) ? [{ id: 'legacy', title: 'Fields', repeating: false, fields: r.fields_snapshot }] : [];
+  }
   return {
     id: r.id, templateId: r.template_id, templateName: r.template_name, category: r.category,
-    department: r.department, fieldsSnapshot: r.fields_snapshot || [], values: r.values || {},
+    department: r.department, sectionsSnapshot, values: r.values || {},
+    title: r.title || r.template_name,
     filledBy: r.filled_by_name, filledAt: r.filled_at, filledAtTime: r.filled_at_time,
   };
 }
@@ -122,13 +145,12 @@ const emptyForm = {
   revision: 'A', status: 'Draft', effectiveDate: todayISO(), expiryDate: '',
   content: '', attachments: []
 };
-const emptyTemplateForm = { id: null, name: '', category: 'Inspection Checklist', department: '', fields: [], description: '', attachments: [] };
-
+const emptyTemplateForm = { id: null, name: '', category: 'Inspection Checklist', department: '', sections: [], description: '', attachments: [], titleTemplate: '' };
 
 export default function App() {
   const [authLoaded, setAuthLoaded] = useState(false);
-  const [authUser, setAuthUser] = useState(null);   // supabase auth user
-  const [profile, setProfile] = useState(null);      // row from public.profiles
+  const [authUser, setAuthUser] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [authMode, setAuthMode] = useState('login');
   const [authError, setAuthError] = useState(null);
   const [authInfo, setAuthInfo] = useState(null);
@@ -144,7 +166,7 @@ export default function App() {
   const [form, setForm] = useState(emptyForm);
   const [templateForm, setTemplateForm] = useState(emptyTemplateForm);
   const [fillingTemplate, setFillingTemplate] = useState(null);
-  const [removedAttachments, setRemovedAttachments] = useState([]); // paths to delete from storage
+  const [removedAttachments, setRemovedAttachments] = useState([]);
   const [removedTemplateAttachments, setRemovedTemplateAttachments] = useState([]);
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('All');
@@ -156,7 +178,6 @@ export default function App() {
   const [attachmentUrlCache, setAttachmentUrlCache] = useState({});
   const [loadingAttachments, setLoadingAttachments] = useState({});
 
-  // ---------- Auth bootstrap ----------
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setAuthUser(data.session?.user || null);
@@ -177,7 +198,6 @@ export default function App() {
     })();
   }, [authUser]);
 
-  // ---------- App data ----------
   useEffect(() => {
     if (!authUser || !profile || !profile.active) return;
     (async () => {
@@ -208,10 +228,217 @@ export default function App() {
 
   function logout() { supabase.auth.signOut(); setView('dashboard'); }
 
+  if (!authLoaded) return <CenteredMessage text="Loading…" />;
+  if (recoveryMode) return <UpdatePasswordScreen onDone={() => setRecoveryMode(false)} />;
+
+  if (!authUser) {
+    return (
+      <AuthGate
+        mode={authMode} setMode={setAuthMode} error={authError} info={authInfo}
+        onLogin={async (email, password) => {
+          setAuthError(null); setAuthInfo(null);
+          const { error } = await supabase.auth.signInWithPassword({ email, password });
+          if (error) setAuthError(error.message);
+        }}
+        onSignup={async (name, email, password) => {
+          setAuthError(null); setAuthInfo(null);
+          const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { name } } });
+          if (error) { setAuthError(error.message); return; }
+          if (!data.session) { setAuthInfo('Account created. Check your email to confirm it, then log in.'); setAuthMode('login'); }
+        }}
+        onForgotPassword={async (email) => {
+          setAuthError(null); setAuthInfo(null);
+          const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
+          if (error) setAuthError(error.message); else setAuthInfo('Password reset email sent — check your inbox.');
+        }}
+      />
+    );
+  }
+
+  if (!profile) return <CenteredMessage text="Setting up your account…" />;
+
+  if (!profile.active) {
+    return (
+      <AuthShell>
+        <ShieldOff size={22} color={C.red} style={{ marginBottom: 10 }} />
+        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, margin: '0 0 8px' }}>Access disabled</h1>
+        <p style={{ fontSize: 13.5, color: C.dim, marginBottom: 20, lineHeight: 1.6 }}>Your account has been deactivated. Contact your workspace admin if you think this is a mistake.</p>
+        <button onClick={logout} style={{ ...btnGhost(C), width: '100%', justifyContent: 'center' }}>Sign Out</button>
+      </AuthShell>
+    );
+  }
+
+  const isAdmin = profile.role === 'admin';
+  const canBuildTemplates = isAdmin || !!profile.can_build;
+  const canBuildDocuments = isAdmin || !!profile.can_build_docs;
+  const displayName = profile.name || authUser.email;
+
+  function startNew() { setForm({ ...emptyForm, id: null, attachments: [] }); setRemovedAttachments([]); setView('form'); }
+  function startEdit(doc) { setForm({ ...doc, attachments: doc.attachments || [] }); setRemovedAttachments([]); setView('form'); }
+
+  async function saveForm(e) {
+    e.preventDefault();
+    if (!form.title.trim()) return;
+    setSaving(true); setSaveError(null);
+    try {
+      for (const path of removedAttachments) { await supabase.storage.from(ATTACH_BUCKET).remove([path]).catch(() => {}); }
+      const cleaned = [];
+      for (const a of (form.attachments || [])) {
+        if (a.isNew && a.file) {
+          const path = `${uid('att')}-${a.file.name}`;
+          const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, a.file);
+          if (upErr) { setSaveError(`"${a.name}" didn't upload: ${upErr.message}`); continue; }
+          cleaned.push({ id: a.id, name: a.name, type: a.type, size: a.size, path });
+        } else { cleaned.push({ id: a.id, name: a.name, type: a.type, size: a.size, path: a.path }); }
+      }
+      const payload = {
+        title: form.title, type: form.type, department: form.department || null, owner: form.owner || null,
+        revision: form.revision || 'A', status: form.status,
+        effective_date: form.effectiveDate || null, expiry_date: form.expiryDate || null,
+        content: form.content || null, attachments: cleaned,
+        updated_by_name: displayName, updated_at: new Date().toISOString(),
+      };
+      if (form.id) {
+        const { error } = await supabase.from('documents').update(payload).eq('id', form.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('documents').insert({ ...payload, created_by: authUser.id, created_by_name: displayName });
+        if (error) throw error;
+      }
+      await refreshDocs();
+      setView('documents');
+    } catch (err) {
+      setSaveError(err.message || 'Could not save this document.');
+    } finally { setSaving(false); }
+  }
+
+  async function deleteDoc(id) {
+    const doc = docs.find(d => d.id === id);
+    const { error } = await supabase.from('documents').delete().eq('id', id);
+    if (!error) {
+      for (const a of (doc?.attachments || [])) { if (a.path) await supabase.storage.from(ATTACH_BUCKET).remove([a.path]).catch(() => {}); }
+      await refreshDocs();
+    } else { setSaveError(error.message); }
+    setConfirmDelete(null);
+    if (activeDoc && activeDoc.id === id) setActiveDoc(null);
+  }
+
+  async function quickStatus(id, status) {
+    const { error } = await supabase.from('documents').update({ status, updated_by_name: displayName, updated_at: new Date().toISOString() }).eq('id', id);
+    if (error) setSaveError(error.message); else refreshDocs();
+  }
+
+  async function loadAttachment(att) {
+    const key = att.id;
+    if (attachmentUrlCache[key] || loadingAttachments[key] || !att.path) return;
+    setLoadingAttachments(s => ({ ...s, [key]: true }));
+    try {
+      const { data, error } = await supabase.storage.from(ATTACH_BUCKET).download(att.path);
+      if (!error && data) setAttachmentUrlCache(c => ({ ...c, [key]: URL.createObjectURL(data) }));
+    } finally { setLoadingAttachments(s => ({ ...s, [key]: false })); }
+  }
+
+  // ---------- Templates ----------
+  function startNewTemplate() { setTemplateForm({ ...emptyTemplateForm, id: null, sections: [], attachments: [] }); setRemovedTemplateAttachments([]); setView('templateForm'); }
+  function startEditTemplate(t) { setTemplateForm({ ...t, attachments: t.attachments || [] }); setRemovedTemplateAttachments([]); setView('templateForm'); }
+
+  async function saveTemplate(e) {
+    e.preventDefault();
+    if (!templateForm.name.trim() || templateForm.sections.length === 0) return;
+    setSaving(true); setSaveError(null);
+    try {
+      for (const path of removedTemplateAttachments) { await supabase.storage.from(ATTACH_BUCKET).remove([path]).catch(() => {}); }
+      const cleanedAttachments = [];
+      for (const a of (templateForm.attachments || [])) {
+        if (a.isNew && a.file) {
+          const path = `${uid('att')}-${a.file.name}`;
+          const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, a.file);
+          if (upErr) { setSaveError(`"${a.name}" didn't upload: ${upErr.message}`); continue; }
+          cleanedAttachments.push({ id: a.id, name: a.name, type: a.type, size: a.size, path });
+        } else { cleanedAttachments.push({ id: a.id, name: a.name, type: a.type, size: a.size, path: a.path }); }
+      }
+      const payload = {
+        name: templateForm.name, category: templateForm.category, department: templateForm.department || null,
+        sections: templateForm.sections, title_template: templateForm.titleTemplate || null,
+        description: templateForm.description || null, attachments: cleanedAttachments,
+        updated_by_name: displayName, updated_at: new Date().toISOString(),
+      };
+      if (templateForm.id) {
+        const { error } = await supabase.from('templates').update(payload).eq('id', templateForm.id);
+        if (error) throw error;
+      } else {
+        const { error } = await supabase.from('templates').insert({ ...payload, created_by_name: displayName });
+        if (error) throw error;
+      }
+      await refreshTemplates();
+      setView('templates');
+    } catch (err) {
+      setSaveError(err.message || 'Could not save this template.');
+    } finally { setSaving(false); }
+  }
+
+  async function deleteTemplate(id) {
+    const t = templates.find(x => x.id === id);
+    const { error } = await supabase.from('templates').delete().eq('id', id);
+    if (!error) {
+      for (const a of (t?.attachments || [])) { if (a.path) await supabase.storage.from(ATTACH_BUCKET).remove([a.path]).catch(() => {}); }
+      await refreshTemplates();
+    } else { setSaveError(error.message); }
+    setConfirmDeleteTemplate(null);
+  }
+
+  function startFill(t) { setFillingTemplate(t); setView('fillForm'); }
+
+  async function submitFilledForm(rawValues) {
+    setSaving(true); setSaveError(null);
+    try {
+      const finalValues = {};
+      for (const section of fillingTemplate.sections) {
+        if (section.repeating) {
+          const rows = rawValues[section.id] || [];
+          const finalRows = [];
+          for (const row of rows) {
+            const finalRow = {};
+            for (const f of section.fields) {
+              const v = row[f.id];
+              if (f.type === 'Photo' && v instanceof File) {
+                const path = `${uid('att')}-${v.name}`;
+                const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, v);
+                if (upErr) { setSaveError(`"${v.name}" didn't upload: ${upErr.message}`); continue; }
+                finalRow[f.id] = { id: uid('sp'), name: v.name, type: v.type, size: v.size, path };
+              } else if (v !== undefined) { finalRow[f.id] = v; }
+            }
+            finalRows.push(finalRow);
+          }
+          finalValues[section.id] = finalRows;
+        } else {
+          for (const f of section.fields) {
+            const v = rawValues[f.id];
+            if (f.type === 'Photo' && v instanceof File) {
+              const path = `${uid('att')}-${v.name}`;
+              const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, v);
+              if (upErr) { setSaveError(`"${v.name}" didn't upload: ${upErr.message}`); continue; }
+              finalValues[f.id] = { id: uid('sp'), name: v.name, type: v.type, size: v.size, path };
+            } else if (v !== undefined) { finalValues[f.id] = v; }
+          }
+        }
+      }
+      const title = interpolateTitle(fillingTemplate, finalValues);
+      const { error } = await supabase.from('submissions').insert({
+        template_id: fillingTemplate.id, template_name: fillingTemplate.name, category: fillingTemplate.category,
+        department: fillingTemplate.department, sections_snapshot: fillingTemplate.sections, values: finalValues,
+        title: title || null, filled_by_name: displayName, filled_at: todayISO(),
+      });
+      if (error) throw error;
+      await refreshSubmissions();
+      setFillingTemplate(null);
+      setView('submissions');
+    } catch (err) {
+      setSaveError(err.message || 'Could not save this entry.');
+    } finally { setSaving(false); }
+  }
+
   // ---------- Derived ----------
-  // These hooks must run on every render regardless of auth state, so they live
-  // above all early returns below. docs/submissions are [] until data loads,
-  // which is a safe input for all of these.
   const withStatus = useMemo(() => docs.map(d => ({ ...d, effStatus: effectiveStatus(d) })), [docs]);
   const filtered = useMemo(() => withStatus.filter(d => {
     if (filterType !== 'All' && d.type !== filterType) return false;
@@ -256,240 +483,6 @@ export default function App() {
   const recentSubmissions = useMemo(() =>
     [...submissions].sort((a, b) => new Date(b.filledAtTime || b.filledAt) - new Date(a.filledAtTime || a.filledAt)).slice(0, 6),
     [submissions]);
-
-  // ================= Auth screens =================
-  if (!authLoaded) return <CenteredMessage text="Loading…" />;
-
-  if (recoveryMode) {
-    return <UpdatePasswordScreen onDone={() => { setRecoveryMode(false); }} />;
-  }
-
-  if (!authUser) {
-    return (
-      <AuthGate
-        mode={authMode} setMode={setAuthMode} error={authError} info={authInfo}
-        onLogin={async (email, password) => {
-          setAuthError(null); setAuthInfo(null);
-          const { error } = await supabase.auth.signInWithPassword({ email, password });
-          if (error) setAuthError(error.message);
-        }}
-        onSignup={async (name, email, password) => {
-          setAuthError(null); setAuthInfo(null);
-          const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { name } } });
-          if (error) { setAuthError(error.message); return; }
-          if (!data.session) {
-            setAuthInfo('Account created. Check your email to confirm it, then log in.');
-            setAuthMode('login');
-          }
-        }}
-        onForgotPassword={async (email) => {
-          setAuthError(null); setAuthInfo(null);
-          const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: window.location.origin });
-          if (error) setAuthError(error.message);
-          else setAuthInfo('Password reset email sent — check your inbox.');
-        }}
-      />
-    );
-  }
-
-  if (!profile) return <CenteredMessage text="Setting up your account…" />;
-
-  if (!profile.active) {
-    return (
-      <AuthShell>
-        <ShieldOff size={22} color={C.red} style={{ marginBottom: 10 }} />
-        <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, margin: '0 0 8px' }}>Access disabled</h1>
-        <p style={{ fontSize: 13.5, color: C.dim, marginBottom: 20, lineHeight: 1.6 }}>
-          Your account has been deactivated. Contact your workspace admin if you think this is a mistake.
-        </p>
-        <button onClick={logout} style={{ ...btnGhost(C), width: '100%', justifyContent: 'center' }}>Sign Out</button>
-      </AuthShell>
-    );
-  }
-
-  // ================= Logged in =================
-  const isAdmin = profile.role === 'admin';
-  const canBuildTemplates = isAdmin || !!profile.can_build;
-  const canBuildDocuments = isAdmin || !!profile.can_build_docs;
-  const displayName = profile.name || authUser.email;
-
-  function startNew() { setForm({ ...emptyForm, id: null, attachments: [] }); setRemovedAttachments([]); setView('form'); }
-  function startEdit(doc) { setForm({ ...doc, attachments: doc.attachments || [] }); setRemovedAttachments([]); setView('form'); }
-
-  async function saveForm(e) {
-    e.preventDefault();
-    if (!form.title.trim()) return;
-    setSaving(true); setSaveError(null);
-    try {
-      for (const path of removedAttachments) {
-        await supabase.storage.from(ATTACH_BUCKET).remove([path]).catch(() => {});
-      }
-      const cleaned = [];
-      for (const a of (form.attachments || [])) {
-        if (a.isNew && a.file) {
-          const path = `${uid('att')}-${a.file.name}`;
-          const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, a.file);
-          if (upErr) { setSaveError(`"${a.name}" didn't upload: ${upErr.message}`); continue; }
-          cleaned.push({ id: a.id, name: a.name, type: a.type, size: a.size, path });
-        } else {
-          cleaned.push({ id: a.id, name: a.name, type: a.type, size: a.size, path: a.path });
-        }
-      }
-      const payload = {
-        title: form.title, type: form.type, department: form.department || null, owner: form.owner || null,
-        revision: form.revision || 'A', status: form.status,
-        effective_date: form.effectiveDate || null, expiry_date: form.expiryDate || null,
-        content: form.content || null, attachments: cleaned,
-        updated_by_name: displayName, updated_at: new Date().toISOString(),
-      };
-      if (form.id) {
-        const { error } = await supabase.from('documents').update(payload).eq('id', form.id);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('documents').insert({
-          ...payload, created_by: authUser.id, created_by_name: displayName,
-        });
-        if (error) throw error;
-      }
-      await refreshDocs();
-      setView('documents');
-    } catch (err) {
-      setSaveError(err.message || 'Could not save this document.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function deleteDoc(id) {
-    const doc = docs.find(d => d.id === id);
-    const { error } = await supabase.from('documents').delete().eq('id', id);
-    if (!error) {
-      for (const a of (doc?.attachments || [])) {
-        if (a.path) await supabase.storage.from(ATTACH_BUCKET).remove([a.path]).catch(() => {});
-      }
-      await refreshDocs();
-    } else {
-      setSaveError(error.message);
-    }
-    setConfirmDelete(null);
-    if (activeDoc && activeDoc.id === id) setActiveDoc(null);
-  }
-
-  async function quickStatus(id, status) {
-    const { error } = await supabase.from('documents').update({ status, updated_by_name: displayName, updated_at: new Date().toISOString() }).eq('id', id);
-    if (error) setSaveError(error.message); else refreshDocs();
-  }
-
-  async function loadAttachment(att) {
-    const key = att.id;
-    if (attachmentUrlCache[key] || loadingAttachments[key] || !att.path) return;
-    setLoadingAttachments(s => ({ ...s, [key]: true }));
-    try {
-      const { data, error } = await supabase.storage.from(ATTACH_BUCKET).download(att.path);
-      if (!error && data) {
-        const url = URL.createObjectURL(data);
-        setAttachmentUrlCache(c => ({ ...c, [key]: url }));
-      }
-    } finally {
-      setLoadingAttachments(s => ({ ...s, [key]: false }));
-    }
-  }
-
-  // ---------- Templates ----------
-  function startNewTemplate() { setTemplateForm({ ...emptyTemplateForm, id: null, fields: [], attachments: [] }); setRemovedTemplateAttachments([]); setView('templateForm'); }
-  function startEditTemplate(t) { setTemplateForm({ ...t, attachments: t.attachments || [] }); setRemovedTemplateAttachments([]); setView('templateForm'); }
-  async function saveTemplate(e) {
-    e.preventDefault();
-    if (!templateForm.name.trim() || templateForm.fields.length === 0) return;
-    setSaving(true); setSaveError(null);
-    try {
-      for (const path of removedTemplateAttachments) {
-        await supabase.storage.from(ATTACH_BUCKET).remove([path]).catch(() => {});
-      }
-      const cleanedAttachments = [];
-      for (const a of (templateForm.attachments || [])) {
-        if (a.isNew && a.file) {
-          const path = `${uid('att')}-${a.file.name}`;
-          const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, a.file);
-          if (upErr) { setSaveError(`"${a.name}" didn't upload: ${upErr.message}`); continue; }
-          cleanedAttachments.push({ id: a.id, name: a.name, type: a.type, size: a.size, path });
-        } else {
-          cleanedAttachments.push({ id: a.id, name: a.name, type: a.type, size: a.size, path: a.path });
-        }
-      }
-      const payload = {
-        name: templateForm.name, category: templateForm.category, department: templateForm.department || null,
-        fields: templateForm.fields, description: templateForm.description || null, attachments: cleanedAttachments,
-        updated_by_name: displayName, updated_at: new Date().toISOString(),
-      };
-      if (templateForm.id) {
-        const { error } = await supabase.from('templates').update(payload).eq('id', templateForm.id);
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from('templates').insert({ ...payload, created_by_name: displayName });
-        if (error) throw error;
-      }
-      await refreshTemplates();
-      setView('templates');
-    } catch (err) {
-      setSaveError(err.message || 'Could not save this template.');
-    } finally {
-      setSaving(false);
-    }
-  }
-  async function deleteTemplate(id) {
-    const t = templates.find(x => x.id === id);
-    const { error } = await supabase.from('templates').delete().eq('id', id);
-    if (!error) {
-      for (const a of (t?.attachments || [])) {
-        if (a.path) await supabase.storage.from(ATTACH_BUCKET).remove([a.path]).catch(() => {});
-      }
-      await refreshTemplates();
-    } else {
-      setSaveError(error.message);
-    }
-    setConfirmDeleteTemplate(null);
-  }
-  function startFill(t) { setFillingTemplate(t); setView('fillForm'); }
-  async function submitFilledForm(values) {
-    setSaving(true); setSaveError(null);
-    try {
-      // Photo-type fields hold a raw File object until now — upload each one and
-      // swap it for a stored reference before the submission is saved.
-      const finalValues = {};
-      for (const f of fillingTemplate.fields) {
-        const v = values[f.id];
-        if (f.type === 'Photo' && v instanceof File) {
-          const path = `${uid('att')}-${v.name}`;
-          const { error: upErr } = await supabase.storage.from(ATTACH_BUCKET).upload(path, v);
-          if (upErr) { setSaveError(`"${v.name}" didn't upload: ${upErr.message}`); continue; }
-          finalValues[f.id] = { id: uid('sp'), name: v.name, type: v.type, size: v.size, path };
-        } else if (v !== undefined) {
-          finalValues[f.id] = v;
-        }
-      }
-      const { error } = await supabase.from('submissions').insert({
-        template_id: fillingTemplate.id, template_name: fillingTemplate.name, category: fillingTemplate.category,
-        department: fillingTemplate.department, fields_snapshot: fillingTemplate.fields, values: finalValues,
-        filled_by_name: displayName, filled_at: todayISO(),
-      });
-      if (error) throw error;
-      await refreshSubmissions();
-      setFillingTemplate(null);
-      setView('submissions');
-    } catch (err) {
-      setSaveError(err.message || 'Could not save this entry.');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  // ---------- User management (admin) ----------
-  async function updateProfile(id, patch) {
-    const { error } = await supabase.from('profiles').update(patch).eq('id', id);
-    if (error) { setAuthError(error.message); return; }
-    // Refresh the users list held in UserManagement via a full profiles refetch, handled in that component.
-  }
 
   const NavItem = ({ id, icon: Icon, label }) => (
     <button onClick={() => setView(id)} style={{
@@ -597,13 +590,17 @@ export default function App() {
         )}
 
         {view === 'users' && isAdmin && (
-          <UserManagement currentUserId={authUser.id} onUpdateProfile={updateProfile} />
+          <UserManagement currentUserId={authUser.id} onUpdateProfile={async (id, patch) => {
+            const { error } = await supabase.from('profiles').update(patch).eq('id', id);
+            if (error) setAuthError(error.message);
+          }} />
         )}
       </div>
 
       {activeDoc && (
         <Modal onClose={() => setActiveDoc(null)}>
           <div id="print-area">
+            <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 14, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Production Document Center</div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
               <div>
                 <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeDoc.type} · REV. {activeDoc.revision || 'A'}</div>
@@ -636,6 +633,9 @@ export default function App() {
                 </div>
               </div>
             )}
+            <div style={{ marginTop: 24, paddingTop: 12, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.faint }}>
+              Printed {todayISO()}
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
             {canBuildDocuments && <button onClick={() => { setActiveDoc(null); startEdit(activeDoc); }} style={btnPrimary(C)}><Pencil size={14} /> Edit Document</button>}
@@ -648,29 +648,51 @@ export default function App() {
       {activeSubmission && (
         <Modal onClose={() => setActiveSubmission(null)}>
           <div id="print-area">
+            <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 14, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Production Document Center</div>
             <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeSubmission.category}</div>
-            <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 21, margin: '0 0 6px' }}>{activeSubmission.templateName}</h2>
+            <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 21, margin: '0 0 6px' }}>{activeSubmission.title || activeSubmission.templateName}</h2>
+            {activeSubmission.title && activeSubmission.title !== activeSubmission.templateName && (
+              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6 }}>{activeSubmission.templateName}</div>
+            )}
             <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 18 }}>
               Filled out by <strong style={{ color: C.text }}>{activeSubmission.filledBy}</strong> on {activeSubmission.filledAt}
               {activeSubmission.department ? ` · ${activeSubmission.department}` : ''}
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {(activeSubmission.fieldsSnapshot || []).filter(f => fieldVisible(f, activeSubmission.values)).map(f => (
-                <div key={f.id} style={{ borderBottom: `1px solid ${C.border}`, paddingBottom: 10 }}>
-                  <div style={{ fontSize: 11.5, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 5 }}>{f.label}</div>
-                  {f.type === 'Pass/Fail' ? (
-                    <PassFailBadge value={activeSubmission.values[f.id]} />
-                  ) : f.type === 'Photo' ? (
-                    activeSubmission.values[f.id]?.path ? (
-                      <div style={{ maxWidth: 160 }}>
-                        <AttachmentTile meta={activeSubmission.values[f.id]} url={attachmentUrlCache[activeSubmission.values[f.id].id]} isLoading={!!loadingAttachments[activeSubmission.values[f.id].id]} onLoad={() => loadAttachment(activeSubmission.values[f.id])} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+              {(activeSubmission.sectionsSnapshot || []).map(section => (
+                <div key={section.id}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 10, paddingBottom: 6, borderBottom: `2px solid ${C.border}` }}>
+                    {section.title || 'Fields'}
+                  </div>
+                  {section.repeating ? (
+                    (activeSubmission.values[section.id] || []).length === 0 ? (
+                      <div style={{ fontSize: 12.5, color: C.faint }}>No entries logged.</div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {(activeSubmission.values[section.id] || []).map((row, i) => (
+                          <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 14 }}>
+                            <div style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Entry {i + 1}</div>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                              {section.fields.filter(f => fieldVisible(f, row)).map(f => (
+                                <FieldAnswer key={f.id} field={f} value={row[f.id]} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
+                              ))}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ) : <span style={{ color: C.faint, fontSize: 14 }}>—</span>
+                    )
                   ) : (
-                    <div style={{ fontSize: 14, color: C.text, whiteSpace: 'pre-wrap' }}>{activeSubmission.values[f.id] || <span style={{ color: C.faint }}>—</span>}</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      {section.fields.filter(f => fieldVisible(f, activeSubmission.values)).map(f => (
+                        <FieldAnswer key={f.id} field={f} value={activeSubmission.values[f.id]} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
+                      ))}
+                    </div>
                   )}
                 </div>
               ))}
+            </div>
+            <div style={{ marginTop: 24, paddingTop: 12, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.faint }}>
+              Printed {todayISO()}
             </div>
           </div>
           <div style={{ display: 'flex', gap: 10, marginTop: 22 }}>
@@ -758,9 +780,7 @@ function AuthGate({ mode, setMode, onLogin, onSignup, onForgotPassword, error, i
   return (
     <AuthShell>
       <h1 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, margin: '0 0 4px', color: C.navy }}>Production Document Center</h1>
-      <p style={{ fontSize: 13.5, color: C.dim, margin: '0 0 22px' }}>
-        {mode === 'signup' ? 'Create your account.' : 'Log in to your workspace.'}
-      </p>
+      <p style={{ fontSize: 13.5, color: C.dim, margin: '0 0 22px' }}>{mode === 'signup' ? 'Create your account.' : 'Log in to your workspace.'}</p>
       <form onSubmit={submit}>
         {mode === 'signup' && (
           <>
@@ -776,16 +796,12 @@ function AuthGate({ mode, setMode, onLogin, onSignup, onForgotPassword, error, i
         <input value={password} onChange={e => setPassword(e.target.value)} type="password"
           style={{ width: '100%', padding: '10px 12px', borderRadius: 6, border: `1px solid ${C.border}`, fontSize: 14, marginBottom: 8, fontFamily: 'inherit' }} />
         {mode === 'login' && (
-          <button type="button" onClick={() => { setForgotOpen(true); setForgotEmail(email); }} style={{ border: 'none', background: 'none', color: C.blue, fontSize: 12, cursor: 'pointer', padding: 0, marginBottom: 14 }}>
-            Forgot password?
-          </button>
+          <button type="button" onClick={() => { setForgotOpen(true); setForgotEmail(email); }} style={{ border: 'none', background: 'none', color: C.blue, fontSize: 12, cursor: 'pointer', padding: 0, marginBottom: 14 }}>Forgot password?</button>
         )}
         {mode === 'signup' && <div style={{ marginBottom: 14 }} />}
         {error && <div style={{ color: C.red, fontSize: 12.5, marginBottom: 14 }}>{error}</div>}
         {info && <div style={{ color: C.green, fontSize: 12.5, marginBottom: 14 }}>{info}</div>}
-        <button type="submit" style={{ ...btnPrimary(C), width: '100%', justifyContent: 'center', padding: '11px 18px' }}>
-          {mode === 'signup' ? 'Create Account' : 'Log In'}
-        </button>
+        <button type="submit" style={{ ...btnPrimary(C), width: '100%', justifyContent: 'center', padding: '11px 18px' }}>{mode === 'signup' ? 'Create Account' : 'Log In'}</button>
       </form>
       <div style={{ fontSize: 12.5, color: C.dim, marginTop: 18, textAlign: 'center' }}>
         {mode === 'signup' ? (
@@ -827,21 +843,16 @@ function UpdatePasswordScreen({ onDone }) {
   );
 }
 
-// ================= User Management (admin) =================
+// ================= User Management =================
 function UserManagement({ currentUserId, onUpdateProfile }) {
   const [users, setUsers] = useState(null);
   const [err, setErr] = useState(null);
-
   async function load() {
     const { data, error } = await supabase.from('profiles').select('*').order('created_at', { ascending: true });
     if (error) setErr(error.message); else setUsers(data);
   }
   useEffect(() => { load(); }, []);
-
-  async function patch(id, fields) {
-    await onUpdateProfile(id, fields);
-    load();
-  }
+  async function patch(id, fields) { await onUpdateProfile(id, fields); load(); }
   function toggleRole(u) {
     const admins = (users || []).filter(x => x.role === 'admin' && x.active);
     if (u.id === currentUserId) return;
@@ -856,9 +867,7 @@ function UserManagement({ currentUserId, onUpdateProfile }) {
     if (u.role === 'admin' && u.active && admins.length <= 1) return;
     patch(u.id, { active: !u.active });
   }
-
   if (!users) return <CenteredMessage text="Loading users…" />;
-
   return (
     <div>
       <PageHeader title="Users" subtitle={`${users.length} ${users.length === 1 ? 'person has' : 'people have'} an account. People create their own accounts from the sign-up screen — grant permissions here afterward.`} />
@@ -875,20 +884,14 @@ function UserManagement({ currentUserId, onUpdateProfile }) {
                 {u.role === 'admin' && <ShieldCheck size={11} />}{u.role === 'admin' ? 'Admin' : 'Member'}
               </span>
             </button>
-            {u.role === 'admin' ? (
-              <span style={{ fontSize: 11.5, color: C.faint }}>Included</span>
-            ) : (
+            {u.role === 'admin' ? <span style={{ fontSize: 11.5, color: C.faint }}>Included</span> : (
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.text, cursor: 'pointer' }}>
-                <input type="checkbox" checked={!!u.can_build_docs} onChange={() => toggleBuildDocs(u)} />
-                {u.can_build_docs ? 'Can build' : 'View only'}
+                <input type="checkbox" checked={!!u.can_build_docs} onChange={() => toggleBuildDocs(u)} />{u.can_build_docs ? 'Can build' : 'View only'}
               </label>
             )}
-            {u.role === 'admin' ? (
-              <span style={{ fontSize: 11.5, color: C.faint }}>Included</span>
-            ) : (
+            {u.role === 'admin' ? <span style={{ fontSize: 11.5, color: C.faint }}>Included</span> : (
               <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.text, cursor: 'pointer' }}>
-                <input type="checkbox" checked={!!u.can_build} onChange={() => toggleBuild(u)} />
-                {u.can_build ? 'Can build' : 'View only'}
+                <input type="checkbox" checked={!!u.can_build} onChange={() => toggleBuild(u)} />{u.can_build ? 'Can build' : 'View only'}
               </label>
             )}
             <button onClick={() => toggleActive(u)} disabled={u.id === currentUserId} title={u.active ? 'Deactivate' : 'Reactivate'} style={{
@@ -910,7 +913,7 @@ function AttachmentTile({ meta, url, isLoading, onLoad }) {
   useEffect(() => { if (isImage && !url) onLoad(); /* eslint-disable-next-line */ }, []);
   function download() {
     if (url) { const a = document.createElement('a'); a.href = url; a.download = meta.name; a.click(); }
-    else { onLoad(); }
+    else onLoad();
   }
   if (isImage) {
     return (
@@ -927,6 +930,51 @@ function AttachmentTile({ meta, url, isLoading, onLoad }) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10.5, color: C.faint }}><Download size={11} /> {fmtBytes(meta.size)}</div>
     </button>
   );
+}
+
+// Read-only display of one field's answer — used in the submission detail view for
+// both flat (non-repeating) values and per-row values inside a repeating section.
+function FieldAnswer({ field, value, attachmentUrlCache, loadingAttachments, onLoadAttachment }) {
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 4 }}>{field.label}</div>
+      {field.type === 'Pass/Fail' ? (
+        <PassFailBadge value={value} />
+      ) : field.type === 'Photo' ? (
+        value?.path ? (
+          <div style={{ maxWidth: 150 }}>
+            <AttachmentTile meta={value} url={attachmentUrlCache[value.id]} isLoading={!!loadingAttachments[value.id]} onLoad={() => onLoadAttachment(value)} />
+          </div>
+        ) : <span style={{ color: C.faint, fontSize: 13.5 }}>—</span>
+      ) : (
+        <div style={{ fontSize: 13.5, color: C.text, whiteSpace: 'pre-wrap' }}>{value || <span style={{ color: C.faint }}>—</span>}</div>
+      )}
+    </div>
+  );
+}
+
+// Renders the correct input control for one field, given a flat value/onChange pair.
+// Used both for a non-repeating section's fields and for one row inside a repeating one.
+function FieldInput({ field, value, onChange, inputStyle }) {
+  if (field.type === 'Text') return <input style={inputStyle} value={value || ''} onChange={e => onChange(e.target.value)} />;
+  if (field.type === 'Notes') return <textarea style={{ ...inputStyle, minHeight: 80, resize: 'vertical' }} value={value || ''} onChange={e => onChange(e.target.value)} />;
+  if (field.type === 'Number') return <input type="number" style={inputStyle} value={value || ''} onChange={e => onChange(e.target.value)} />;
+  if (field.type === 'Date') return <input type="date" style={inputStyle} value={value || ''} onChange={e => onChange(e.target.value)} />;
+  if (field.type === 'Yes/No') return <select style={inputStyle} value={value || ''} onChange={e => onChange(e.target.value)}><option value="">Select…</option><option>Yes</option><option>No</option></select>;
+  if (field.type === 'Pass/Fail') return <select style={inputStyle} value={value || ''} onChange={e => onChange(e.target.value)}><option value="">Select…</option><option>Pass</option><option>Fail</option></select>;
+  if (field.type === 'Multiple Choice') return (
+    <select style={inputStyle} value={value || ''} onChange={e => onChange(e.target.value)}>
+      <option value="">Select…</option>
+      {(field.options || '').split(',').map(o => o.trim()).filter(Boolean).map(o => <option key={o}>{o}</option>)}
+    </select>
+  );
+  if (field.type === 'Photo') return (
+    <div>
+      <input type="file" accept="image/*" capture="environment" onChange={e => onChange(e.target.files?.[0] || null)} style={inputStyle} />
+      {value && <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.dim }}><Camera size={12} /> {value.name} ({fmtBytes(value.size)})</div>}
+    </div>
+  );
+  return null;
 }
 
 // ================= Dashboard =================
@@ -990,7 +1038,7 @@ function Dashboard({ kpis, statusChartData, typeChartData, expiringList, recentS
               {recentSubmissions.map(s => (
                 <button key={s.id} onClick={() => onSelectSubmission(s)} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', padding: '10px 4px', border: 'none', borderTop: `1px solid ${C.border}`, background: 'transparent', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ fontSize: 13.5, fontWeight: 500, color: C.text }}>{s.templateName}</span>
+                    <span style={{ fontSize: 13.5, fontWeight: 500, color: C.text }}>{s.title || s.templateName}</span>
                     <span style={{ fontSize: 11.5, color: C.faint }}>By {s.filledBy} · {s.filledAt}</span>
                   </div>
                   <ChevronRight size={14} color={C.faint} />
@@ -1079,12 +1127,8 @@ function DocumentForm({ form, setForm, onCancel, onSubmit, onRemoveExisting, inp
     try {
       const text = await extractWordText(file);
       setForm(f => ({ ...f, title: f.title || titleFromFilename(file.name), content: text }));
-    } catch (err) {
-      setWordError('Could not read that file. Make sure it\'s a .docx Word document.');
-    } finally {
-      setImporting(false);
-      if (wordInputRef.current) wordInputRef.current.value = '';
-    }
+    } catch (err) { setWordError('Could not read that file. Make sure it\'s a .docx Word document.'); }
+    finally { setImporting(false); if (wordInputRef.current) wordInputRef.current.value = ''; }
   }
   return (
     <div style={{ maxWidth: 640 }}>
@@ -1161,18 +1205,23 @@ function TemplatesList({ templates, isAdmin, canBuild, onNew, onEdit, onDelete, 
     <div>
       <PageHeader title="Templates" subtitle="Reusable forms your team fills out over and over." />
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 14 }}>
-        {templates.map(t => (
-          <div key={t.id} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 20 }}>
-            <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{t.category}{t.department ? ` · ${t.department}` : ''}</div>
-            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 8 }}>{t.name}</div>
-            <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 16 }}>{t.fields.length} field{t.fields.length === 1 ? '' : 's'} · filled out {countFor(t.id)} time{countFor(t.id) === 1 ? '' : 's'}</div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => onFill(t)} style={{ ...btnPrimary(C), padding: '8px 14px', fontSize: 13 }}><ClipboardCheck size={14} /> Fill Out</button>
-              {canBuild && <IconBtn onClick={() => onEdit(t)} title="Edit"><Pencil size={14} /></IconBtn>}
-              {isAdmin && <IconBtn onClick={() => onDelete(t.id)} title="Delete"><Trash2 size={14} /></IconBtn>}
+        {templates.map(t => {
+          const fieldCount = (t.sections || []).reduce((sum, s) => sum + s.fields.length, 0);
+          return (
+            <div key={t.id} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 20 }}>
+              <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{t.category}{t.department ? ` · ${t.department}` : ''}</div>
+              <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 16, fontWeight: 600, marginBottom: 8 }}>{t.name}</div>
+              <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 16 }}>
+                {(t.sections || []).length} section{(t.sections || []).length === 1 ? '' : 's'} · {fieldCount} field{fieldCount === 1 ? '' : 's'} · filled out {countFor(t.id)} time{countFor(t.id) === 1 ? '' : 's'}
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => onFill(t)} style={{ ...btnPrimary(C), padding: '8px 14px', fontSize: 13 }}><ClipboardCheck size={14} /> Fill Out</button>
+                {canBuild && <IconBtn onClick={() => onEdit(t)} title="Edit"><Pencil size={14} /></IconBtn>}
+                {isAdmin && <IconBtn onClick={() => onDelete(t.id)} title="Delete"><Trash2 size={14} /></IconBtn>}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
@@ -1187,25 +1236,47 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
   const fileInputRef = useRef(null);
   const wordInputRef = useRef(null);
 
-  function addField() { setTemplateForm(f => ({ ...f, fields: [...f.fields, { id: uid('f'), label: '', type: 'Text', options: '', required: true, condition: null }] })); }
-  function updateField(id, patch) { setTemplateForm(f => ({ ...f, fields: f.fields.map(fl => fl.id === id ? { ...fl, ...patch } : fl) })); }
-  function removeField(id) {
+  function addSection() { setTemplateForm(f => ({ ...f, sections: [...f.sections, { id: uid('sec'), title: '', repeating: false, fields: [] }] })); }
+  function updateSection(id, patch) { setTemplateForm(f => ({ ...f, sections: f.sections.map(s => s.id === id ? { ...s, ...patch } : s) })); }
+  function removeSection(id) { setTemplateForm(f => ({ ...f, sections: f.sections.filter(s => s.id !== id) })); }
+  function moveSection(id, dir) {
+    setTemplateForm(f => {
+      const idx = f.sections.findIndex(s => s.id === id);
+      const swap = idx + dir;
+      if (swap < 0 || swap >= f.sections.length) return f;
+      const next = [...f.sections];
+      [next[idx], next[swap]] = [next[swap], next[idx]];
+      return { ...f, sections: next };
+    });
+  }
+  function addFieldToSection(sectionId) {
+    setTemplateForm(f => ({ ...f, sections: f.sections.map(s => s.id === sectionId ? { ...s, fields: [...s.fields, { id: uid('f'), label: '', type: 'Text', options: '', required: true, condition: null }] } : s) }));
+  }
+  function updateFieldInSection(sectionId, fieldId, patch) {
+    setTemplateForm(f => ({ ...f, sections: f.sections.map(s => s.id !== sectionId ? s : { ...s, fields: s.fields.map(fl => fl.id === fieldId ? { ...fl, ...patch } : fl) }) }));
+  }
+  function removeFieldFromSection(sectionId, fieldId) {
     setTemplateForm(f => ({
       ...f,
-      fields: f.fields
-        .filter(fl => fl.id !== id)
-        .map(fl => fl.condition && fl.condition.fieldId === id ? { ...fl, condition: null } : fl),
+      sections: f.sections.map(s => s.id !== sectionId ? s : {
+        ...s,
+        fields: s.fields.filter(fl => fl.id !== fieldId).map(fl => fl.condition && fl.condition.fieldId === fieldId ? { ...fl, condition: null } : fl),
+      }),
     }));
   }
-  function moveField(id, dir) {
-    setTemplateForm(f => {
-      const idx = f.fields.findIndex(fl => fl.id === id);
-      const swapIdx = idx + dir;
-      if (swapIdx < 0 || swapIdx >= f.fields.length) return f;
-      const next = [...f.fields];
-      [next[idx], next[swapIdx]] = [next[swapIdx], next[idx]];
-      return { ...f, fields: next };
-    });
+  function moveFieldInSection(sectionId, fieldId, dir) {
+    setTemplateForm(f => ({
+      ...f,
+      sections: f.sections.map(s => {
+        if (s.id !== sectionId) return s;
+        const idx = s.fields.findIndex(fl => fl.id === fieldId);
+        const swap = idx + dir;
+        if (swap < 0 || swap >= s.fields.length) return s;
+        const next = [...s.fields];
+        [next[idx], next[swap]] = [next[swap], next[idx]];
+        return { ...s, fields: next };
+      }),
+    }));
   }
   function handleFiles(e) {
     const files = Array.from(e.target.files || []);
@@ -1227,31 +1298,28 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
     try {
       const text = await extractWordText(file);
       setTemplateForm(f => ({ ...f, name: f.name || titleFromFilename(file.name), description: text }));
-    } catch (err) {
-      setWordError('Could not read that file. Make sure it\'s a .docx Word document.');
-    } finally {
-      setImporting(false);
-      if (wordInputRef.current) wordInputRef.current.value = '';
-    }
+    } catch (err) { setWordError('Could not read that file. Make sure it\'s a .docx Word document.'); }
+    finally { setImporting(false); if (wordInputRef.current) wordInputRef.current.value = ''; }
   }
 
-  const canSubmit = templateForm.name.trim() && templateForm.fields.length > 0 && templateForm.fields.every(f => f.label.trim());
+  const canSubmit = templateForm.name.trim() && templateForm.sections.length > 0 &&
+    templateForm.sections.every(s => s.title.trim() && s.fields.length > 0 && s.fields.every(f => f.label.trim()));
 
   return (
-    <div style={{ maxWidth: 680 }}>
-      <PageHeader title={templateForm.id ? 'Edit Template' : 'New Template'} subtitle="Define the fields once — everyone will fill out this same form going forward." />
+    <div style={{ maxWidth: 700 }}>
+      <PageHeader title={templateForm.id ? 'Edit Template' : 'New Template'} subtitle="Group related fields into sections — mark a section \u201crepeating\u201d if people should be able to log more than one of it." />
       <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <button type="button" onClick={() => wordInputRef.current && wordInputRef.current.click()} disabled={importing} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13 }}>
           {importing ? <Loader2 size={14} /> : <Upload size={14} />} {importing ? 'Reading file…' : 'Import from Word (.docx)'}
         </button>
         <input ref={wordInputRef} type="file" accept=".docx" onChange={handleWordFile} style={{ display: 'none' }} />
         {wordError && <span style={{ color: C.red, fontSize: 12 }}>{wordError}</span>}
-        <span style={{ fontSize: 11.5, color: C.faint }}>Fills in the name and description below — add your fields manually after.</span>
+        <span style={{ fontSize: 11.5, color: C.faint }}>Fills in the name and description below — add your sections and fields manually after.</span>
       </div>
       <form onSubmit={onSubmit} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 24 }}>
         <div style={{ marginBottom: 16 }}>
           <label style={labelStyle}>Template Name *</label>
-          <input required style={inputStyle} value={templateForm.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Daily Rack Install Inspection" />
+          <input required style={inputStyle} value={templateForm.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Building Inspection Form" />
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
           <div><label style={labelStyle}>Category</label>
@@ -1259,9 +1327,14 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
           <div><label style={labelStyle}>Department</label>
             <input style={inputStyle} value={templateForm.department} onChange={e => set('department', e.target.value)} placeholder="e.g. Assembly" /></div>
         </div>
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelStyle}>Submission Title Template</label>
+          <input style={inputStyle} value={templateForm.titleTemplate || ''} onChange={e => set('titleTemplate', e.target.value)} placeholder="e.g. {{Building Number}} - {{Location}}" />
+          <div style={{ fontSize: 11.5, color: C.faint, marginTop: 5 }}>Optional. Wrap a field's exact label in double braces to pull its answer into each submission's title — makes entries easier to tell apart in the Submissions list.</div>
+        </div>
         <div style={{ marginBottom: 22 }}>
           <label style={labelStyle}>Description / Instructions</label>
-          <textarea style={{ ...inputStyle, minHeight: 100, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.6 }} value={templateForm.description || ''} onChange={e => set('description', e.target.value)} placeholder="Context or instructions shown before the fields when someone fills this out..." />
+          <textarea style={{ ...inputStyle, minHeight: 90, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.6 }} value={templateForm.description || ''} onChange={e => set('description', e.target.value)} placeholder="Context or instructions shown before the fields when someone fills this out..." />
         </div>
 
         <div style={{ marginBottom: 22 }}>
@@ -1281,73 +1354,89 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
           {fileError && <div style={{ color: C.red, fontSize: 12, marginTop: 8 }}>{fileError}</div>}
         </div>
 
-        <label style={labelStyle}>Fields</label>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
-          {templateForm.fields.length === 0 && <div style={{ fontSize: 13, color: C.faint, padding: '12px 2px' }}>No fields yet — add the first one below.</div>}
-          {templateForm.fields.map((f, i) => {
-            const eligible = templateForm.fields.slice(0, i).filter(other => CONDITIONABLE_TYPES.includes(other.type) && other.label.trim());
-            const conditionField = f.condition ? templateForm.fields.find(x => x.id === f.condition.fieldId) : null;
-            return (
-              <div key={f.id} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 14, background: C.bg }}>
-                <div style={{ display: 'flex', gap: 10, marginBottom: f.type === 'Multiple Choice' ? 10 : 0, flexWrap: 'wrap' }}>
-                  <input style={{ ...inputStyle, flex: '2 1 160px', background: '#fff' }} value={f.label} onChange={e => updateField(f.id, { label: e.target.value })} placeholder="Field label, e.g. Torque spec met?" />
-                  <select style={{ ...inputStyle, flex: '1 1 130px', background: '#fff' }} value={f.type} onChange={e => updateField(f.id, { type: e.target.value })}>{FIELD_TYPES.map(ft => <option key={ft}>{ft}</option>)}</select>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.dim, whiteSpace: 'nowrap' }}>
-                    <input type="checkbox" checked={f.required} onChange={e => updateField(f.id, { required: e.target.checked })} /> Required
-                  </label>
-                  <div style={{ display: 'flex', gap: 4 }}>
-                    <IconBtn onClick={() => moveField(f.id, -1)} title="Move up"><ArrowUp size={13} /></IconBtn>
-                    <IconBtn onClick={() => moveField(f.id, 1)} title="Move down"><ArrowDown size={13} /></IconBtn>
-                    <IconBtn onClick={() => removeField(f.id)} title="Remove field"><X size={14} /></IconBtn>
-                  </div>
-                </div>
-                {f.type === 'Multiple Choice' && (
-                  <input style={{ ...inputStyle, background: '#fff', marginBottom: 10 }} value={f.options} onChange={e => updateField(f.id, { options: e.target.value })} placeholder="Options, separated by commas (e.g. Line 1, Line 2, Line 3)" />
-                )}
-                {f.type === 'Photo' && (
-                  <div style={{ fontSize: 12, color: C.faint, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Camera size={13} /> Whoever fills this out will be asked to attach a photo here.</div>
-                )}
-
-                <div style={{ paddingTop: 10, borderTop: `1px dashed ${C.borderStrong}` }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.dim, cursor: eligible.length === 0 ? 'default' : 'pointer' }}>
-                    <input
-                      type="checkbox" checked={!!f.condition} disabled={eligible.length === 0}
-                      onChange={e => updateField(f.id, { condition: e.target.checked ? { fieldId: '', equals: '' } : null })}
-                    />
-                    Only show this field conditionally
-                  </label>
-                  {eligible.length === 0 && (
-                    <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>Add a Yes/No, Pass/Fail, or Multiple Choice field above this one to make it conditional.</div>
-                  )}
-                  {f.condition && (
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <span style={{ fontSize: 12, color: C.dim }}>Show when</span>
-                      <select
-                        style={{ ...inputStyle, background: '#fff', flex: '1 1 150px', padding: '7px 10px' }}
-                        value={f.condition.fieldId}
-                        onChange={e => updateField(f.id, { condition: { fieldId: e.target.value, equals: '' } })}
-                      >
-                        <option value="">Choose a field…</option>
-                        {eligible.map(ef => <option key={ef.id} value={ef.id}>{ef.label}</option>)}
-                      </select>
-                      <span style={{ fontSize: 12, color: C.dim }}>is</span>
-                      <select
-                        style={{ ...inputStyle, background: '#fff', flex: '1 1 130px', padding: '7px 10px' }}
-                        value={f.condition.equals}
-                        disabled={!f.condition.fieldId}
-                        onChange={e => updateField(f.id, { condition: { ...f.condition, equals: e.target.value } })}
-                      >
-                        <option value="">Select…</option>
-                        {optionsForField(conditionField).map(o => <option key={o}>{o}</option>)}
-                      </select>
-                    </div>
-                  )}
+        <label style={labelStyle}>Sections</label>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16, marginBottom: 14 }}>
+          {templateForm.sections.length === 0 && <div style={{ fontSize: 13, color: C.faint, padding: '12px 2px' }}>No sections yet — add one below to start adding fields.</div>}
+          {templateForm.sections.map((section, si) => (
+            <div key={section.id} style={{ border: `1px solid ${C.borderStrong}`, borderRadius: 8, padding: 16, background: '#fbfcfd' }}>
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+                <Layers size={15} color={C.navy} style={{ flexShrink: 0 }} />
+                <input
+                  style={{ ...inputStyle, flex: '2 1 180px', background: '#fff', fontWeight: 600 }}
+                  value={section.title} onChange={e => updateSection(section.id, { title: e.target.value })}
+                  placeholder="Section title, e.g. Building Details"
+                />
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.dim, whiteSpace: 'nowrap' }}>
+                  <input type="checkbox" checked={!!section.repeating} onChange={e => updateSection(section.id, { repeating: e.target.checked })} />
+                  Repeating (multiple entries)
+                </label>
+                <div style={{ display: 'flex', gap: 4, marginLeft: 'auto' }}>
+                  <IconBtn onClick={() => moveSection(section.id, -1)} title="Move section up"><ArrowUp size={13} /></IconBtn>
+                  <IconBtn onClick={() => moveSection(section.id, 1)} title="Move section down"><ArrowDown size={13} /></IconBtn>
+                  <IconBtn onClick={() => removeSection(section.id)} title="Remove section"><Trash2 size={13} /></IconBtn>
                 </div>
               </div>
-            );
-          })}
+              {section.repeating && (
+                <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 5 }}>
+                  <Copy size={11} /> People filling this out can add as many entries of this section as they need — great for logging a list of defects, items, or issues.
+                </div>
+              )}
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 10 }}>
+                {section.fields.length === 0 && <div style={{ fontSize: 12.5, color: C.faint, padding: '4px 2px' }}>No fields in this section yet.</div>}
+                {section.fields.map((f, fi) => {
+                  const eligible = section.fields.slice(0, fi).filter(other => CONDITIONABLE_TYPES.includes(other.type) && other.label.trim());
+                  const conditionField = f.condition ? section.fields.find(x => x.id === f.condition.fieldId) : null;
+                  return (
+                    <div key={f.id} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 12, background: C.bg }}>
+                      <div style={{ display: 'flex', gap: 10, marginBottom: f.type === 'Multiple Choice' ? 10 : 0, flexWrap: 'wrap' }}>
+                        <input style={{ ...inputStyle, flex: '2 1 160px', background: '#fff' }} value={f.label} onChange={e => updateFieldInSection(section.id, f.id, { label: e.target.value })} placeholder="Field label, e.g. Torque spec met?" />
+                        <select style={{ ...inputStyle, flex: '1 1 130px', background: '#fff' }} value={f.type} onChange={e => updateFieldInSection(section.id, f.id, { type: e.target.value })}>{FIELD_TYPES.map(ft => <option key={ft}>{ft}</option>)}</select>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.dim, whiteSpace: 'nowrap' }}>
+                          <input type="checkbox" checked={f.required} onChange={e => updateFieldInSection(section.id, f.id, { required: e.target.checked })} /> Required
+                        </label>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <IconBtn onClick={() => moveFieldInSection(section.id, f.id, -1)} title="Move up"><ArrowUp size={13} /></IconBtn>
+                          <IconBtn onClick={() => moveFieldInSection(section.id, f.id, 1)} title="Move down"><ArrowDown size={13} /></IconBtn>
+                          <IconBtn onClick={() => removeFieldFromSection(section.id, f.id)} title="Remove field"><X size={14} /></IconBtn>
+                        </div>
+                      </div>
+                      {f.type === 'Multiple Choice' && (
+                        <input style={{ ...inputStyle, background: '#fff', marginBottom: 10 }} value={f.options} onChange={e => updateFieldInSection(section.id, f.id, { options: e.target.value })} placeholder="Options, separated by commas (e.g. Line 1, Line 2, Line 3)" />
+                      )}
+                      {f.type === 'Photo' && (
+                        <div style={{ fontSize: 12, color: C.faint, display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10 }}><Camera size={13} /> Whoever fills this out will be asked to attach a photo here.</div>
+                      )}
+                      <div style={{ paddingTop: 10, borderTop: `1px dashed ${C.borderStrong}` }}>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.dim, cursor: eligible.length === 0 ? 'default' : 'pointer' }}>
+                          <input type="checkbox" checked={!!f.condition} disabled={eligible.length === 0} onChange={e => updateFieldInSection(section.id, f.id, { condition: e.target.checked ? { fieldId: '', equals: '' } : null })} />
+                          Only show this field conditionally
+                        </label>
+                        {eligible.length === 0 && <div style={{ fontSize: 11, color: C.faint, marginTop: 4 }}>Add a Yes/No, Pass/Fail, or Multiple Choice field above this one (in the same section) to make it conditional.</div>}
+                        {f.condition && (
+                          <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                            <span style={{ fontSize: 12, color: C.dim }}>Show when</span>
+                            <select style={{ ...inputStyle, background: '#fff', flex: '1 1 150px', padding: '7px 10px' }} value={f.condition.fieldId} onChange={e => updateFieldInSection(section.id, f.id, { condition: { fieldId: e.target.value, equals: '' } })}>
+                              <option value="">Choose a field…</option>
+                              {eligible.map(ef => <option key={ef.id} value={ef.id}>{ef.label}</option>)}
+                            </select>
+                            <span style={{ fontSize: 12, color: C.dim }}>is</span>
+                            <select style={{ ...inputStyle, background: '#fff', flex: '1 1 130px', padding: '7px 10px' }} value={f.condition.equals} disabled={!f.condition.fieldId} onChange={e => updateFieldInSection(section.id, f.id, { condition: { ...f.condition, equals: e.target.value } })}>
+                              <option value="">Select…</option>
+                              {optionsForField(conditionField).map(o => <option key={o}>{o}</option>)}
+                            </select>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <button type="button" onClick={() => addFieldToSection(section.id)} style={{ ...btnGhost(C), padding: '7px 12px', fontSize: 12.5 }}><PlusCircle size={13} /> Add Field</button>
+            </div>
+          ))}
         </div>
-        <button type="button" onClick={addField} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13, marginBottom: 22 }}><PlusCircle size={14} /> Add Field</button>
+        <button type="button" onClick={addSection} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13, marginBottom: 22 }}><FolderPlus size={14} /> Add Section</button>
 
         <div style={{ display: 'flex', gap: 10 }}>
           <button type="submit" disabled={!canSubmit || saving} style={{ ...btnPrimary(C), opacity: (!canSubmit || saving) ? 0.6 : 1 }}>
@@ -1362,36 +1451,62 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
 
 // ================= Fill out a template =================
 function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving, sessionName }) {
-  const [values, setValues] = useState({});
+  const [values, setValues] = useState(() => {
+    const init = {};
+    (template.sections || []).forEach(s => { if (s.repeating) init[s.id] = []; });
+    return init;
+  });
   const [errors, setErrors] = useState([]);
   const [refCache, setRefCache] = useState({});
   const [refLoading, setRefLoading] = useState({});
-  function setVal(id, v) { setValues(prev => ({ ...prev, [id]: v })); }
+
+  function setVal(fieldId, v) { setValues(prev => ({ ...prev, [fieldId]: v })); }
+  function setRowVal(sectionId, rowIdx, fieldId, v) {
+    setValues(prev => {
+      const rows = [...(prev[sectionId] || [])];
+      rows[rowIdx] = { ...rows[rowIdx], [fieldId]: v };
+      return { ...prev, [sectionId]: rows };
+    });
+  }
+  function addRow(sectionId) { setValues(prev => ({ ...prev, [sectionId]: [...(prev[sectionId] || []), {}] })); }
+  function removeRow(sectionId, rowIdx) { setValues(prev => ({ ...prev, [sectionId]: (prev[sectionId] || []).filter((_, i) => i !== rowIdx) })); }
+
   async function loadRef(att) {
     if (refCache[att.id] || refLoading[att.id] || !att.path) return;
     setRefLoading(s => ({ ...s, [att.id]: true }));
     try {
       const { data, error } = await supabase.storage.from(ATTACH_BUCKET).download(att.path);
       if (!error && data) setRefCache(c => ({ ...c, [att.id]: URL.createObjectURL(data) }));
-    } finally {
-      setRefLoading(s => ({ ...s, [att.id]: false }));
-    }
+    } finally { setRefLoading(s => ({ ...s, [att.id]: false })); }
   }
+
   function handleSubmit(e) {
     e.preventDefault();
-    const visibleFields = template.fields.filter(f => fieldVisible(f, values));
-    const missing = visibleFields.filter(f => f.required && (f.type === 'Photo' ? !values[f.id] : !(values[f.id] || '').toString().trim()));
-    if (missing.length > 0) { setErrors(missing.map(f => f.label)); return; }
+    const missing = [];
+    template.sections.forEach(section => {
+      if (section.repeating) {
+        (values[section.id] || []).forEach((row, i) => {
+          section.fields.filter(f => fieldVisible(f, row)).forEach(f => {
+            if (f.required && (f.type === 'Photo' ? !row[f.id] : !(row[f.id] || '').toString().trim())) {
+              missing.push(`${f.label} (${section.title || 'entry'} #${i + 1})`);
+            }
+          });
+        });
+      } else {
+        section.fields.filter(f => fieldVisible(f, values)).forEach(f => {
+          if (f.required && (f.type === 'Photo' ? !values[f.id] : !(values[f.id] || '').toString().trim())) {
+            missing.push(f.label);
+          }
+        });
+      }
+    });
+    if (missing.length > 0) { setErrors(missing); return; }
     setErrors([]);
-    // Drop any leftover value for a field that isn't currently visible — e.g. someone
-    // answered a follow-up question, then changed the trigger answer back.
-    const visibleIds = new Set(visibleFields.map(f => f.id));
-    const trimmedValues = {};
-    Object.keys(values).forEach(k => { if (visibleIds.has(k)) trimmedValues[k] = values[k]; });
-    onSubmit(trimmedValues);
+    onSubmit(values);
   }
+
   return (
-    <div style={{ maxWidth: 640 }}>
+    <div style={{ maxWidth: 680 }}>
       <PageHeader title={template.name} subtitle={`${template.category}${template.department ? ' · ' + template.department : ''} — filling out as ${sessionName}`} />
 
       {(template.description || (template.attachments && template.attachments.length > 0)) && (
@@ -1399,9 +1514,7 @@ function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving
           {template.description && <div style={{ fontSize: 13.5, color: C.text, whiteSpace: 'pre-wrap', lineHeight: 1.6, marginBottom: (template.attachments || []).length > 0 ? 14 : 0 }}>{template.description}</div>}
           {(template.attachments && template.attachments.length > 0) && (
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 10 }}>
-              {template.attachments.map(a => (
-                <AttachmentTile key={a.id} meta={a} url={refCache[a.id]} isLoading={!!refLoading[a.id]} onLoad={() => loadRef(a)} />
-              ))}
+              {template.attachments.map(a => <AttachmentTile key={a.id} meta={a} url={refCache[a.id]} isLoading={!!refLoading[a.id]} onLoad={() => loadRef(a)} />)}
             </div>
           )}
         </div>
@@ -1413,36 +1526,57 @@ function FillForm({ template, onCancel, onSubmit, inputStyle, labelStyle, saving
             Fill in required field{errors.length === 1 ? '' : 's'}: {errors.join(', ')}
           </div>
         )}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          {template.fields.filter(f => fieldVisible(f, values)).map(f => (
-            <div key={f.id}>
-              <label style={labelStyle}>{f.label}{f.required && ' *'}</label>
-              {f.type === 'Text' && <input style={inputStyle} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)} />}
-              {f.type === 'Notes' && <textarea style={{ ...inputStyle, minHeight: 90, resize: 'vertical' }} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)} />}
-              {f.type === 'Number' && <input type="number" style={inputStyle} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)} />}
-              {f.type === 'Date' && <input type="date" style={inputStyle} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)} />}
-              {f.type === 'Yes/No' && <select style={inputStyle} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)}><option value="">Select…</option><option>Yes</option><option>No</option></select>}
-              {f.type === 'Pass/Fail' && <select style={inputStyle} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)}><option value="">Select…</option><option>Pass</option><option>Fail</option></select>}
-              {f.type === 'Multiple Choice' && (
-                <select style={inputStyle} value={values[f.id] || ''} onChange={e => setVal(f.id, e.target.value)}>
-                  <option value="">Select…</option>
-                  {(f.options || '').split(',').map(o => o.trim()).filter(Boolean).map(o => <option key={o}>{o}</option>)}
-                </select>
-              )}
-              {f.type === 'Photo' && (
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 26 }}>
+          {template.sections.map(section => (
+            <div key={section.id}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: C.navy, marginBottom: 12, paddingBottom: 8, borderBottom: `2px solid ${C.border}` }}>
+                {section.title || 'Section'}
+              </div>
+              {section.repeating ? (
                 <div>
-                  <input type="file" accept="image/*" capture="environment" onChange={e => setVal(f.id, e.target.files?.[0] || null)} style={inputStyle} />
-                  {values[f.id] && (
-                    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.dim }}>
-                      <Camera size={13} /> {values[f.id].name} ({fmtBytes(values[f.id].size)})
-                    </div>
+                  {(values[section.id] || []).length === 0 && (
+                    <div style={{ fontSize: 12.5, color: C.faint, marginBottom: 12 }}>No entries yet. Add one if this section applies.</div>
                   )}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 12 }}>
+                    {(values[section.id] || []).map((row, rowIdx) => (
+                      <div key={rowIdx} style={{ border: `1px solid ${C.border}`, borderRadius: 8, padding: 16, background: C.bg }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 700, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Entry {rowIdx + 1}</span>
+                          <button type="button" onClick={() => removeRow(section.id, rowIdx)} style={{ border: 'none', background: 'none', color: C.red, fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <Trash2 size={12} /> Remove
+                          </button>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                          {section.fields.filter(f => fieldVisible(f, row)).map(f => (
+                            <div key={f.id}>
+                              <label style={labelStyle}>{f.label}{f.required && ' *'}</label>
+                              <FieldInput field={f} value={row[f.id]} onChange={v => setRowVal(section.id, rowIdx, f.id, v)} inputStyle={inputStyle} />
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <button type="button" onClick={() => addRow(section.id)} style={{ ...btnGhost(C), padding: '8px 14px', fontSize: 13 }}>
+                    <PlusCircle size={14} /> Add {section.title || 'Entry'}
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                  {section.fields.filter(f => fieldVisible(f, values)).map(f => (
+                    <div key={f.id}>
+                      <label style={labelStyle}>{f.label}{f.required && ' *'}</label>
+                      <FieldInput field={f} value={values[f.id]} onChange={v => setVal(f.id, v)} inputStyle={inputStyle} />
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
           ))}
         </div>
-        <div style={{ display: 'flex', gap: 10, marginTop: 24 }}>
+
+        <div style={{ display: 'flex', gap: 10, marginTop: 26 }}>
           <button type="submit" disabled={saving} style={{ ...btnPrimary(C), opacity: saving ? 0.7 : 1 }}>{saving ? <Loader2 size={14} /> : null}{saving ? 'Submitting…' : 'Submit'}</button>
           <button type="button" onClick={onCancel} style={btnGhost(C)}>Cancel</button>
         </div>
@@ -1479,12 +1613,13 @@ function SubmissionsList({ submissions, templates, onView }) {
         </select>
       </div>
       <div style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
-          <span>Template</span><span>Filled By</span><span>Date</span><span>Department</span>
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1fr 1fr', padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
+          <span>Entry</span><span>Template</span><span>Filled By</span><span>Date</span><span>Department</span>
         </div>
         {sorted.map(s => (
-          <button key={s.id} onClick={() => onView(s)} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr', padding: '13px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
-            <span style={{ fontWeight: 600, color: C.navy }}>{s.templateName}</span>
+          <button key={s.id} onClick={() => onView(s)} style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1fr 1fr', padding: '13px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
+            <span style={{ fontWeight: 600, color: C.navy }}>{s.title || s.templateName}</span>
+            <span style={{ color: C.dim }}>{s.templateName}</span>
             <span style={{ color: C.dim }}>{s.filledBy}</span>
             <span style={{ color: C.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>{s.filledAt}</span>
             <span style={{ color: C.dim }}>{s.department || '—'}</span>
@@ -1540,7 +1675,7 @@ function EmptyState({ title, body, onNew, canCreate = true }) {
 function Modal({ children, onClose, narrow }) {
   return (
     <div style={{ position: 'fixed', inset: 0, background: 'rgba(11,32,51,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 20 }} onClick={onClose}>
-      <div className="modal-inner" style={{ background: '#fff', borderRadius: 10, padding: 28, width: '100%', maxWidth: narrow ? 400 : 620, maxHeight: '84vh', overflow: 'auto', position: 'relative', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
+      <div className="modal-inner" style={{ background: '#fff', borderRadius: 10, padding: 28, width: '100%', maxWidth: narrow ? 400 : 660, maxHeight: '84vh', overflow: 'auto', position: 'relative', boxShadow: '0 20px 60px rgba(0,0,0,0.25)' }} onClick={e => e.stopPropagation()}>
         <button onClick={onClose} style={{ position: 'absolute', top: 16, right: 16, border: 'none', background: 'none', cursor: 'pointer', color: C.faint }}><X size={18} /></button>
         {children}
       </div>
