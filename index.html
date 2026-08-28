@@ -15,15 +15,22 @@
         body * { visibility: hidden; }
         #print-area, #print-area * { visibility: visible; }
 
-        /* The modal is normally centered on screen via fixed positioning and
-           flexbox. Left as-is for print, that centering pushes the content
-           down by however much empty space is left above/below it on the
-           page. Flatten it back into normal document flow instead. */
+        /* The app's root layout is display:flex (sidebar + main content).
+           If the modal backdrop drops out of fixed positioning during print,
+           it becomes a THIRD flex item alongside them instead of an
+           independent overlay — which is what pushed content off to the
+           right in the previous attempt. Keeping it fixed avoids that,
+           while switching from center-aligned to top-aligned removes the
+           blank gap that centering caused. */
         .modal-backdrop {
-          position: static !important;
-          display: block !important;
+          position: fixed !important;
+          inset: 0 !important;
+          display: flex !important;
+          align-items: flex-start !important;
+          justify-content: stretch !important;
           background: none !important;
           padding: 0 !important;
+          overflow: visible !important;
         }
         .modal-inner {
           position: static !important;
@@ -34,11 +41,11 @@
           border-radius: 0 !important;
           padding: 0 !important;
           margin: 0 !important;
-          width: auto !important;
+          width: 100% !important;
         }
         #print-area {
           position: static !important;
-          width: auto !important;
+          width: 100% !important;
           padding: 0 !important;
         }
       }
