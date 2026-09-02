@@ -10,7 +10,7 @@ import {
   Paperclip, Image as ImageIcon, Download, File as FileIcon, Loader2,
   Users, LogOut, ShieldCheck, UserPlus, ClipboardList,
   ClipboardCheck, ArrowUp, ArrowDown, ListChecks, Ban, ShieldOff,
-  Upload, Printer, Camera, FolderPlus, Layers, Copy
+  Upload, Printer, Camera, FolderPlus, Layers, Copy, Menu
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import { supabase } from './supabaseClient';
@@ -178,6 +178,16 @@ export default function App() {
   const [confirmDeleteTemplate, setConfirmDeleteTemplate] = useState(null);
   const [attachmentUrlCache, setAttachmentUrlCache] = useState({});
   const [loadingAttachments, setLoadingAttachments] = useState({});
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth <= 768);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const handler = () => setIsMobile(mq.matches);
+    handler();
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
@@ -489,7 +499,7 @@ export default function App() {
   }
 
   const NavItem = ({ id, icon: Icon, label }) => (
-    <button onClick={() => setView(id)} style={{
+    <button onClick={() => { setView(id); setMobileNavOpen(false); }} style={{
       display: 'flex', alignItems: 'center', gap: 10, width: '100%', padding: '10px 14px', borderRadius: 6, border: 'none', cursor: 'pointer',
       background: view === id ? 'rgba(255,255,255,0.1)' : 'transparent', color: view === id ? '#fff' : 'rgba(255,255,255,0.65)',
       fontSize: 14, fontWeight: 500, textAlign: 'left', fontFamily: 'inherit'
@@ -503,51 +513,84 @@ export default function App() {
 
   if (!dataLoaded) return <CenteredMessage text="Loading your workspace…" />;
 
-  return (
-    <div style={{ display: 'flex', minHeight: '100vh', background: C.bg, fontFamily: "'Inter', -apple-system, sans-serif", color: C.text }}>
-      <div style={{ width: 220, background: C.navyDeep, padding: '22px 14px', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
-        <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, color: '#fff', padding: '0 10px 24px 10px', letterSpacing: '0.01em' }}>
-          Production<br /><span style={{ color: '#7fc7a4' }}>Document Center</span>
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-          <NavItem id="dashboard" icon={LayoutGrid} label="Dashboard" />
-          <NavItem id="documents" icon={FileText} label="Documents" />
-          <NavItem id="templates" icon={ClipboardList} label="Templates" />
-          <NavItem id="submissions" icon={ListChecks} label="Submissions" />
-          {isAdmin && <NavItem id="users" icon={Users} label="Users" />}
-        </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 20 }}>
-          {canBuildDocuments && (
-            <button onClick={startNew} style={{ display: 'flex', alignItems: 'center', gap: 8, background: C.green, color: '#fff', border: 'none', borderRadius: 6, padding: '10px 14px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
-              <PlusCircle size={16} /> New Document
-            </button>
-          )}
-          {canBuildTemplates && (
-            <button onClick={startNewTemplate} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.08)', color: '#fff', border: `1px solid rgba(255,255,255,0.15)`, borderRadius: 6, padding: '10px 14px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
-              <ClipboardList size={16} /> New Template
-            </button>
-          )}
-        </div>
-
-        <div style={{ marginTop: 'auto', paddingTop: 20, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-            <div style={{ width: 28, height: 28, borderRadius: '50%', background: isAdmin ? C.green : C.blue, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
-              {displayName.slice(0, 1).toUpperCase()}
-            </div>
-            <div style={{ overflow: 'hidden' }}>
-              <div style={{ color: '#fff', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayName}</div>
-              <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, display: 'flex', alignItems: 'center', gap: 3 }}>
-                {isAdmin && <ShieldCheck size={11} />} {isAdmin ? 'Admin' : 'Member'}
-              </div>
+  // Shared nav content — reused by the desktop sidebar and the mobile
+  // full-screen menu so the two stay in sync without duplicating logic.
+  const navBody = (
+    <>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <NavItem id="dashboard" icon={LayoutGrid} label="Dashboard" />
+        <NavItem id="documents" icon={FileText} label="Documents" />
+        <NavItem id="templates" icon={ClipboardList} label="Templates" />
+        <NavItem id="submissions" icon={ListChecks} label="Submissions" />
+        {isAdmin && <NavItem id="users" icon={Users} label="Users" />}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 20 }}>
+        {canBuildDocuments && (
+          <button onClick={() => { startNew(); setMobileNavOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 8, background: C.green, color: '#fff', border: 'none', borderRadius: 6, padding: '10px 14px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
+            <PlusCircle size={16} /> New Document
+          </button>
+        )}
+        {canBuildTemplates && (
+          <button onClick={() => { startNewTemplate(); setMobileNavOpen(false); }} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.08)', color: '#fff', border: `1px solid rgba(255,255,255,0.15)`, borderRadius: 6, padding: '10px 14px', fontSize: 13.5, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
+            <ClipboardList size={16} /> New Template
+          </button>
+        )}
+      </div>
+      <div style={{ marginTop: 'auto', paddingTop: 20, borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          <div style={{ width: 28, height: 28, borderRadius: '50%', background: isAdmin ? C.green : C.blue, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 12, fontWeight: 700, flexShrink: 0 }}>
+            {displayName.slice(0, 1).toUpperCase()}
+          </div>
+          <div style={{ overflow: 'hidden' }}>
+            <div style={{ color: '#fff', fontSize: 13, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{displayName}</div>
+            <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11, display: 'flex', alignItems: 'center', gap: 3 }}>
+              {isAdmin && <ShieldCheck size={11} />} {isAdmin ? 'Admin' : 'Member'}
             </div>
           </div>
-          <button onClick={logout} style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', background: 'none', border: 'none', color: 'rgba(255,255,255,0.55)', fontSize: 12.5, cursor: 'pointer', padding: '6px 4px', fontFamily: 'inherit' }}>
-            <LogOut size={13} /> Log out
+        </div>
+        <button onClick={() => { setMobileNavOpen(false); logout(); }} style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%', background: 'none', border: 'none', color: 'rgba(255,255,255,0.55)', fontSize: 12.5, cursor: 'pointer', padding: '6px 4px', fontFamily: 'inherit' }}>
+          <LogOut size={13} /> Log out
+        </button>
+      </div>
+    </>
+  );
+
+  return (
+    <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', minHeight: '100vh', background: C.bg, fontFamily: "'Inter', -apple-system, sans-serif", color: C.text }}>
+      {!isMobile && (
+        <div style={{ width: 220, background: C.navyDeep, padding: '22px 14px', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, color: '#fff', padding: '0 10px 24px 10px', letterSpacing: '0.01em' }}>
+            Production<br /><span style={{ color: '#7fc7a4' }}>Document Center</span>
+          </div>
+          {navBody}
+        </div>
+      )}
+
+      {isMobile && (
+        <div style={{ background: C.navyDeep, padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'sticky', top: 0, zIndex: 40, flexShrink: 0 }}>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 14.5, color: '#fff' }}>
+            Production <span style={{ color: '#7fc7a4' }}>Doc Center</span>
+          </div>
+          <button onClick={() => setMobileNavOpen(true)} style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(255,255,255,0.08)', border: 'none', borderRadius: 6, padding: '7px 10px', color: '#fff', cursor: 'pointer' }}>
+            <div style={{ width: 22, height: 22, borderRadius: '50%', background: isAdmin ? C.green : C.blue, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: 10.5, fontWeight: 700, flexShrink: 0 }}>
+              {displayName.slice(0, 1).toUpperCase()}
+            </div>
+            <Menu size={18} />
           </button>
         </div>
-      </div>
+      )}
 
-      <div style={{ flex: 1, padding: '28px 32px', overflow: 'auto' }}>
+      {isMobile && mobileNavOpen && (
+        <div style={{ position: 'fixed', inset: 0, background: C.navyDeep, zIndex: 250, padding: '18px 16px', display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 26 }}>
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 16, color: '#fff' }}>Menu</div>
+            <button onClick={() => setMobileNavOpen(false)} style={{ border: 'none', background: 'none', color: '#fff', cursor: 'pointer', padding: 4 }}><X size={22} /></button>
+          </div>
+          {navBody}
+        </div>
+      )}
+
+      <div style={{ flex: 1, padding: isMobile ? '18px 16px' : '28px 32px', overflow: 'auto', minWidth: 0 }}>
         {saveError && (
           <div style={{ marginBottom: 18, padding: '10px 14px', borderRadius: 6, background: C.redBg, color: C.red, fontSize: 13, fontWeight: 500 }}>{saveError}</div>
         )}
@@ -803,35 +846,37 @@ function UserManagement({ currentUserId, onUpdateProfile }) {
       <PageHeader title="Users" subtitle={`${users.length} ${users.length === 1 ? 'person has' : 'people have'} an account. People create their own accounts from the sign-up screen — grant permissions here afterward.`} />
       {err && <div style={{ color: C.red, fontSize: 13, marginBottom: 14 }}>{err}</div>}
       <div style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden', maxWidth: 960 }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.8fr 0.95fr 0.95fr 0.9fr', padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
-          <span>Name</span><span>Role</span><span>Doc Builder</span><span>Template Builder</span><span>Access</span>
-        </div>
-        {users.map(u => (
-          <div key={u.id} style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.8fr 0.95fr 0.95fr 0.9fr', padding: '12px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center', opacity: u.active ? 1 : 0.55 }}>
-            <span style={{ fontWeight: 600 }}>{u.name}{u.id === currentUserId ? ' (you)' : ''}</span>
-            <button onClick={() => toggleRole(u)} disabled={u.id === currentUserId} style={{ border: 'none', background: 'none', cursor: u.id === currentUserId ? 'default' : 'pointer', padding: 0, textAlign: 'left' }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 600, color: u.role === 'admin' ? C.green : C.dim, background: u.role === 'admin' ? C.greenBg : '#eef1f3', padding: '3px 8px', borderRadius: 4 }}>
-                {u.role === 'admin' && <ShieldCheck size={11} />}{u.role === 'admin' ? 'Admin' : 'Member'}
-              </span>
-            </button>
-            {u.role === 'admin' ? <span style={{ fontSize: 11.5, color: C.faint }}>Included</span> : (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.text, cursor: 'pointer' }}>
-                <input type="checkbox" checked={!!u.can_build_docs} onChange={() => toggleBuildDocs(u)} />{u.can_build_docs ? 'Can build' : 'View only'}
-              </label>
-            )}
-            {u.role === 'admin' ? <span style={{ fontSize: 11.5, color: C.faint }}>Included</span> : (
-              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.text, cursor: 'pointer' }}>
-                <input type="checkbox" checked={!!u.can_build} onChange={() => toggleBuild(u)} />{u.can_build ? 'Can build' : 'View only'}
-              </label>
-            )}
-            <button onClick={() => toggleActive(u)} disabled={u.id === currentUserId} title={u.active ? 'Deactivate' : 'Reactivate'} style={{
-              display: 'flex', alignItems: 'center', gap: 5, border: `1px solid ${C.border}`, background: '#fff', borderRadius: 5,
-              padding: '5px 10px', cursor: u.id === currentUserId ? 'default' : 'pointer', color: u.active ? C.red : C.green, fontSize: 12, fontFamily: 'inherit'
-            }}>
-              <Ban size={12} /> {u.active ? 'Deactivate' : 'Reactivate'}
-            </button>
+        <div style={{ overflowX: 'auto' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.8fr 0.95fr 0.95fr 0.9fr', minWidth: 640, padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
+            <span>Name</span><span>Role</span><span>Doc Builder</span><span>Template Builder</span><span>Access</span>
           </div>
-        ))}
+          {users.map(u => (
+            <div key={u.id} style={{ display: 'grid', gridTemplateColumns: '1.1fr 0.8fr 0.95fr 0.95fr 0.9fr', minWidth: 640, padding: '12px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center', opacity: u.active ? 1 : 0.55 }}>
+              <span style={{ fontWeight: 600 }}>{u.name}{u.id === currentUserId ? ' (you)' : ''}</span>
+              <button onClick={() => toggleRole(u)} disabled={u.id === currentUserId} style={{ border: 'none', background: 'none', cursor: u.id === currentUserId ? 'default' : 'pointer', padding: 0, textAlign: 'left' }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11.5, fontWeight: 600, color: u.role === 'admin' ? C.green : C.dim, background: u.role === 'admin' ? C.greenBg : '#eef1f3', padding: '3px 8px', borderRadius: 4 }}>
+                  {u.role === 'admin' && <ShieldCheck size={11} />}{u.role === 'admin' ? 'Admin' : 'Member'}
+                </span>
+              </button>
+              {u.role === 'admin' ? <span style={{ fontSize: 11.5, color: C.faint }}>Included</span> : (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.text, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!u.can_build_docs} onChange={() => toggleBuildDocs(u)} />{u.can_build_docs ? 'Can build' : 'View only'}
+                </label>
+              )}
+              {u.role === 'admin' ? <span style={{ fontSize: 11.5, color: C.faint }}>Included</span> : (
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, color: C.text, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={!!u.can_build} onChange={() => toggleBuild(u)} />{u.can_build ? 'Can build' : 'View only'}
+                </label>
+              )}
+              <button onClick={() => toggleActive(u)} disabled={u.id === currentUserId} title={u.active ? 'Deactivate' : 'Reactivate'} style={{
+                display: 'flex', alignItems: 'center', gap: 5, border: `1px solid ${C.border}`, background: '#fff', borderRadius: 5,
+                padding: '5px 10px', cursor: u.id === currentUserId ? 'default' : 'pointer', color: u.active ? C.red : C.green, fontSize: 12, fontFamily: 'inherit'
+              }}>
+                <Ban size={12} /> {u.active ? 'Deactivate' : 'Reactivate'}
+              </button>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -1038,7 +1083,7 @@ function Dashboard({ kpis, statusChartData, typeChartData, expiringList, recentS
         <KpiCard label="Expired" value={kpis.expired} color={C.red} />
         <KpiCard label="Submissions (7 days)" value={kpis.submissionsThisWeek} color={C.blue} />
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: 18, marginBottom: 18 }}>
+      <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: 18, marginBottom: 18 }}>
         <ChartCard title="Documents by Status">
           <ResponsiveContainer width="100%" height={220}>
             <PieChart>
@@ -1060,7 +1105,7 @@ function Dashboard({ kpis, statusChartData, typeChartData, expiringList, recentS
           </ResponsiveContainer>
         </ChartCard>
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
+      <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
         <ChartCard title="Expiring Soon">
           {expiringList.length === 0 ? <div style={{ color: C.faint, fontSize: 13.5, padding: '8px 2px' }}>Nothing expiring in the next 30 days.</div> : (
             <div>
@@ -1120,27 +1165,29 @@ function DocumentsList({ filtered, search, setSearch, filterType, setFilterType,
         <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={selectStyle(C)}><option>All</option>{[...STATUS_OPTIONS, 'Expired'].map(s => <option key={s}>{s}</option>)}</select>
       </div>
       <div style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: isAdmin ? '2.2fr 1fr 1fr 1fr 1fr 1.3fr 90px' : '2.2fr 1fr 1fr 1fr 1fr 1.3fr 46px', padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
-          <span>Title</span><span>Type</span><span>Department</span><span>Revision</span><span>Expires</span><span>Status</span><span></span>
-        </div>
-        {filtered.length === 0 ? <div style={{ padding: '32px 16px', textAlign: 'center', color: C.faint, fontSize: 13.5 }}>No documents match these filters.</div> : filtered.map(d => (
-          <div key={d.id} style={{ display: 'grid', gridTemplateColumns: isAdmin ? '2.2fr 1fr 1fr 1fr 1fr 1.3fr 90px' : '2.2fr 1fr 1fr 1fr 1fr 1.3fr 46px', padding: '13px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center' }}>
-            <button onClick={() => onView(d)} style={{ border: 'none', background: 'none', textAlign: 'left', padding: 0, cursor: 'pointer', fontWeight: 600, color: C.navy, fontFamily: 'inherit', fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 6 }}>
-              {d.title}{d.attachments && d.attachments.length > 0 && (<span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, color: C.faint, fontWeight: 500, fontSize: 11.5 }}><Paperclip size={11} />{d.attachments.length}</span>)}
-            </button>
-            <span style={{ color: C.dim }}>{d.type}</span>
-            <span style={{ color: C.dim }}>{d.department || '—'}</span>
-            <span style={{ color: C.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>{d.revision || 'A'}</span>
-            <span style={{ color: C.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>{d.expiryDate || '—'}</span>
-            {canBuild ? (
-              <select value={d.effStatus === 'Expired' ? 'Approved' : d.effStatus} onChange={e => onQuickStatus(d.id, e.target.value)} style={{ border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>{STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}</select>
-            ) : (<Badge status={d.effStatus} />)}
-            <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-              {canBuild && <IconBtn onClick={() => onEdit(d)} title="Edit"><Pencil size={14} /></IconBtn>}
-              {isAdmin && <IconBtn onClick={() => onDelete(d.id)} title="Delete"><Trash2 size={14} /></IconBtn>}
-            </div>
+        <div style={{ overflowX: 'auto' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isAdmin ? '2.2fr 1fr 1fr 1fr 1fr 1.3fr 90px' : '2.2fr 1fr 1fr 1fr 1fr 1.3fr 46px', minWidth: 720, padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
+            <span>Title</span><span>Type</span><span>Department</span><span>Revision</span><span>Expires</span><span>Status</span><span></span>
           </div>
-        ))}
+          {filtered.length === 0 ? <div style={{ padding: '32px 16px', textAlign: 'center', color: C.faint, fontSize: 13.5 }}>No documents match these filters.</div> : filtered.map(d => (
+            <div key={d.id} style={{ display: 'grid', gridTemplateColumns: isAdmin ? '2.2fr 1fr 1fr 1fr 1fr 1.3fr 90px' : '2.2fr 1fr 1fr 1fr 1fr 1.3fr 46px', minWidth: 720, padding: '13px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center' }}>
+              <button onClick={() => onView(d)} style={{ border: 'none', background: 'none', textAlign: 'left', padding: 0, cursor: 'pointer', fontWeight: 600, color: C.navy, fontFamily: 'inherit', fontSize: 13.5, display: 'flex', alignItems: 'center', gap: 6 }}>
+                {d.title}{d.attachments && d.attachments.length > 0 && (<span style={{ display: 'inline-flex', alignItems: 'center', gap: 2, color: C.faint, fontWeight: 500, fontSize: 11.5 }}><Paperclip size={11} />{d.attachments.length}</span>)}
+              </button>
+              <span style={{ color: C.dim }}>{d.type}</span>
+              <span style={{ color: C.dim }}>{d.department || '—'}</span>
+              <span style={{ color: C.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>{d.revision || 'A'}</span>
+              <span style={{ color: C.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>{d.expiryDate || '—'}</span>
+              {canBuild ? (
+                <select value={d.effStatus === 'Expired' ? 'Approved' : d.effStatus} onChange={e => onQuickStatus(d.id, e.target.value)} style={{ border: 'none', background: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>{STATUS_OPTIONS.map(s => <option key={s} value={s}>{s}</option>)}</select>
+              ) : (<Badge status={d.effStatus} />)}
+              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                {canBuild && <IconBtn onClick={() => onEdit(d)} title="Edit"><Pencil size={14} /></IconBtn>}
+                {isAdmin && <IconBtn onClick={() => onDelete(d.id)} title="Delete"><Trash2 size={14} /></IconBtn>}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -1190,15 +1237,15 @@ function DocumentForm({ form, setForm, onCancel, onSubmit, onRemoveExisting, inp
       <form onSubmit={onSubmit} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 24 }}>
         <div style={{ marginBottom: 16 }}><label style={labelStyle}>Title *</label>
           <input required style={inputStyle} value={form.title} onChange={e => set('title', e.target.value)} placeholder="e.g. Weld Inspection Checklist — Line 3" /></div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
           <div><label style={labelStyle}>Document Type</label><select style={inputStyle} value={form.type} onChange={e => set('type', e.target.value)}>{TYPE_OPTIONS.map(t => <option key={t}>{t}</option>)}</select></div>
           <div><label style={labelStyle}>Status</label><select style={inputStyle} value={form.status} onChange={e => set('status', e.target.value)}>{STATUS_OPTIONS.map(s => <option key={s}>{s}</option>)}</select></div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
           <div><label style={labelStyle}>Department</label><input style={inputStyle} value={form.department} onChange={e => set('department', e.target.value)} placeholder="e.g. Assembly" /></div>
           <div><label style={labelStyle}>Owner</label><input style={inputStyle} value={form.owner} onChange={e => set('owner', e.target.value)} placeholder="e.g. F. Felix" /></div>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16, marginBottom: 16 }}>
           <div><label style={labelStyle}>Revision</label><input style={inputStyle} value={form.revision} onChange={e => set('revision', e.target.value)} placeholder="A" /></div>
           <div><label style={labelStyle}>Effective Date</label><input type="date" style={inputStyle} value={form.effectiveDate} onChange={e => set('effectiveDate', e.target.value)} /></div>
           <div><label style={labelStyle}>Expiry Date</label><input type="date" style={inputStyle} value={form.expiryDate} onChange={e => set('expiryDate', e.target.value)} /></div>
@@ -1368,7 +1415,7 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
           <label style={labelStyle}>Template Name *</label>
           <input required style={inputStyle} value={templateForm.name} onChange={e => set('name', e.target.value)} placeholder="e.g. Building Inspection Form" />
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
           <div><label style={labelStyle}>Category</label>
             <select style={inputStyle} value={templateForm.category} onChange={e => set('category', e.target.value)}>{TYPE_OPTIONS.map(t => <option key={t}>{t}</option>)}</select></div>
           <div><label style={labelStyle}>Department</label>
@@ -1660,18 +1707,20 @@ function SubmissionsList({ submissions, templates, onView }) {
         </select>
       </div>
       <div style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, overflow: 'hidden' }}>
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1fr 1fr', padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
-          <span>Entry</span><span>Template</span><span>Filled By</span><span>Date</span><span>Department</span>
+        <div style={{ overflowX: 'auto' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1fr 1fr', minWidth: 620, padding: '10px 16px', fontSize: 11, fontWeight: 600, color: C.faint, textTransform: 'uppercase', letterSpacing: '0.04em', borderBottom: `1px solid ${C.border}`, background: C.bg }}>
+            <span>Entry</span><span>Template</span><span>Filled By</span><span>Date</span><span>Department</span>
+          </div>
+          {sorted.map(s => (
+            <button key={s.id} onClick={() => onView(s)} style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1fr 1fr', minWidth: 620, padding: '13px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
+              <span style={{ fontWeight: 600, color: C.navy }}>{s.title || s.templateName}</span>
+              <span style={{ color: C.dim }}>{s.templateName}</span>
+              <span style={{ color: C.dim }}>{s.filledBy}</span>
+              <span style={{ color: C.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>{s.filledAt}</span>
+              <span style={{ color: C.dim }}>{s.department || '—'}</span>
+            </button>
+          ))}
         </div>
-        {sorted.map(s => (
-          <button key={s.id} onClick={() => onView(s)} style={{ display: 'grid', gridTemplateColumns: '2fr 1.2fr 1fr 1fr 1fr', padding: '13px 16px', fontSize: 13.5, borderBottom: `1px solid ${C.border}`, alignItems: 'center', width: '100%', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit' }}>
-            <span style={{ fontWeight: 600, color: C.navy }}>{s.title || s.templateName}</span>
-            <span style={{ color: C.dim }}>{s.templateName}</span>
-            <span style={{ color: C.dim }}>{s.filledBy}</span>
-            <span style={{ color: C.dim, fontFamily: "'IBM Plex Mono', monospace", fontSize: 12.5 }}>{s.filledAt}</span>
-            <span style={{ color: C.dim }}>{s.department || '—'}</span>
-          </button>
-        ))}
       </div>
     </div>
   );

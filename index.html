@@ -25,6 +25,22 @@
         #print-portal-root { display: block !important; padding: 24px; font-family: 'Inter', -apple-system, sans-serif; }
       }
       #print-portal-root { display: none; }
+
+      /* Mobile layout — the two-column form/dashboard grids collapse to a
+         single column, and modals lose some of their generous desktop
+         padding so more content fits without feeling cramped. Tables
+         (Documents, Users, Submissions) are handled separately in
+         App.jsx via horizontal scroll rather than stacking, since
+         reflowing a data table into cards is a bigger change than this
+         pass covers — they scroll instead of squeezing illegibly. */
+      @media (max-width: 640px) {
+        .stack-mobile {
+          grid-template-columns: 1fr !important;
+        }
+        .modal-inner {
+          padding: 20px !important;
+        }
+      }
     </style>
   </head>
   <body style="margin:0;">
