@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
   BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid,
   Tooltip, ResponsiveContainer, Legend
@@ -601,108 +602,34 @@ export default function App() {
       </div>
 
       {activeDoc && (
-        <Modal onClose={() => setActiveDoc(null)}>
-          <div id="print-area">
-            <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 14, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Production Document Center</div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-              <div>
-                <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeDoc.type} · REV. {activeDoc.revision || 'A'}</div>
-                <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, margin: 0 }}>{activeDoc.title}</h2>
-              </div>
-              <Badge status={effectiveStatus(activeDoc)} />
+        <>
+          <Modal onClose={() => setActiveDoc(null)}>
+            <DocumentPrintContent doc={activeDoc} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
+            <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+              {canBuildDocuments && <button onClick={() => { setActiveDoc(null); startEdit(activeDoc); }} style={btnPrimary(C)}><Pencil size={14} /> Edit Document</button>}
+              <button onClick={() => window.print()} style={btnGhost(C)}><Printer size={14} /> Export PDF</button>
+              <button onClick={() => setActiveDoc(null)} style={btnGhost(C)}>Close</button>
             </div>
-            <div style={{ display: 'flex', gap: 24, margin: '18px 0', fontSize: 13, color: C.dim, flexWrap: 'wrap' }}>
-              <span><strong style={{ color: C.text }}>Department:</strong> {activeDoc.department || '—'}</span>
-              <span><strong style={{ color: C.text }}>Owner:</strong> {activeDoc.owner || '—'}</span>
-              <span><strong style={{ color: C.text }}>Effective:</strong> {activeDoc.effectiveDate || '—'}</span>
-              <span><strong style={{ color: C.text }}>Expires:</strong> {activeDoc.expiryDate || '—'}</span>
-            </div>
-            {(activeDoc.createdBy || activeDoc.updatedBy) && (
-              <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 14 }}>
-                {activeDoc.createdBy && <>Created by {activeDoc.createdBy}{activeDoc.createdAt ? ` on ${activeDoc.createdAt}` : ''}. </>}
-                {activeDoc.updatedBy && <>Last edited by {activeDoc.updatedBy}{activeDoc.updatedAt ? ` on ${activeDoc.updatedAt}` : ''}.</>}
-              </div>
-            )}
-            <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: 16, fontSize: 14, lineHeight: 1.7, whiteSpace: 'pre-wrap', minHeight: 100 }}>
-              {activeDoc.content ? activeDoc.content : <span style={{ color: C.faint }}>No content added yet.</span>}
-            </div>
-            {(activeDoc.attachments && activeDoc.attachments.length > 0) && (
-              <div style={{ marginTop: 20 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 10 }}>Attachments ({activeDoc.attachments.length})</div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
-                  {activeDoc.attachments.map(a => (
-                    <AttachmentTile key={a.id} meta={a} url={attachmentUrlCache[a.id]} isLoading={!!loadingAttachments[a.id]} onLoad={() => loadAttachment(a)} />
-                  ))}
-                </div>
-              </div>
-            )}
-            <div style={{ marginTop: 24, paddingTop: 12, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.faint }}>
-              Printed {todayISO()}
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
-            {canBuildDocuments && <button onClick={() => { setActiveDoc(null); startEdit(activeDoc); }} style={btnPrimary(C)}><Pencil size={14} /> Edit Document</button>}
-            <button onClick={() => window.print()} style={btnGhost(C)}><Printer size={14} /> Export PDF</button>
-            <button onClick={() => setActiveDoc(null)} style={btnGhost(C)}>Close</button>
-          </div>
-        </Modal>
+          </Modal>
+          <PrintPortal>
+            <DocumentPrintContent doc={activeDoc} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
+          </PrintPortal>
+        </>
       )}
 
       {activeSubmission && (
-        <Modal onClose={() => setActiveSubmission(null)}>
-          <div id="print-area">
-            <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 14, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Production Document Center</div>
-            <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{activeSubmission.category}</div>
-            <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 21, margin: '0 0 6px' }}>{activeSubmission.title || activeSubmission.templateName}</h2>
-            {activeSubmission.title && activeSubmission.title !== activeSubmission.templateName && (
-              <div style={{ fontSize: 12, color: C.faint, marginBottom: 6 }}>{activeSubmission.templateName}</div>
-            )}
-            <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 18 }}>
-              Filled out by <strong style={{ color: C.text }}>{activeSubmission.filledBy}</strong> on {activeSubmission.filledAt}
-              {activeSubmission.department ? ` · ${activeSubmission.department}` : ''}
+        <>
+          <Modal onClose={() => setActiveSubmission(null)}>
+            <SubmissionPrintContent submission={activeSubmission} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
+            <div style={{ display: 'flex', gap: 10, marginTop: 22 }}>
+              <button onClick={() => window.print()} style={btnGhost(C)}><Printer size={14} /> Export PDF</button>
+              <button onClick={() => setActiveSubmission(null)} style={btnGhost(C)}>Close</button>
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
-              {(activeSubmission.sectionsSnapshot || []).map(section => (
-                <div key={section.id}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 10, paddingBottom: 6, borderBottom: `2px solid ${C.border}` }}>
-                    {section.title || 'Fields'}
-                  </div>
-                  {section.repeating ? (
-                    (activeSubmission.values[section.id] || []).length === 0 ? (
-                      <div style={{ fontSize: 12.5, color: C.faint }}>No entries logged.</div>
-                    ) : (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                        {(activeSubmission.values[section.id] || []).map((row, i) => (
-                          <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 14 }}>
-                            <div style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Entry {i + 1}</div>
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                              {section.fields.filter(f => fieldVisible(f, row)).map(f => (
-                                <FieldAnswer key={f.id} field={f} value={row[f.id]} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      {section.fields.filter(f => fieldVisible(f, activeSubmission.values)).map(f => (
-                        <FieldAnswer key={f.id} field={f} value={activeSubmission.values[f.id]} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-            <div style={{ marginTop: 24, paddingTop: 12, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.faint }}>
-              Printed {todayISO()}
-            </div>
-          </div>
-          <div style={{ display: 'flex', gap: 10, marginTop: 22 }}>
-            <button onClick={() => window.print()} style={btnGhost(C)}><Printer size={14} /> Export PDF</button>
-            <button onClick={() => setActiveSubmission(null)} style={btnGhost(C)}>Close</button>
-          </div>
-        </Modal>
+          </Modal>
+          <PrintPortal>
+            <SubmissionPrintContent submission={activeSubmission} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={loadAttachment} />
+          </PrintPortal>
+        </>
       )}
 
       {confirmDelete && (
@@ -934,6 +861,123 @@ function AttachmentTile({ meta, url, isLoading, onLoad }) {
     </button>
   );
 }
+
+// Renders its children into a plain, unstyled div appended directly to
+// <body> — completely outside the app's flex-based layout tree. This is
+// what actually makes multi-page PDF export work: printing content that
+// lives inside a position:fixed modal (or any flex-container descendant)
+// gets clipped to a single page by the browser's print engine. A portal
+// sidesteps that entirely by putting the printable copy in normal, plain
+// document flow with no positioned or flex ancestors to fight with.
+function PrintPortal({ children }) {
+  const [container] = useState(() => {
+    const el = document.createElement('div');
+    el.id = 'print-portal-root';
+    return el;
+  });
+  useEffect(() => {
+    document.body.appendChild(container);
+    return () => { document.body.removeChild(container); };
+  }, [container]);
+  return createPortal(children, container);
+}
+
+function DocumentPrintContent({ doc, attachmentUrlCache, loadingAttachments, onLoadAttachment }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 14, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Production Document Center</div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+        <div>
+          <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{doc.type} · REV. {doc.revision || 'A'}</div>
+          <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 22, margin: 0 }}>{doc.title}</h2>
+        </div>
+        <Badge status={effectiveStatus(doc)} />
+      </div>
+      <div style={{ display: 'flex', gap: 24, margin: '18px 0', fontSize: 13, color: C.dim, flexWrap: 'wrap' }}>
+        <span><strong style={{ color: C.text }}>Department:</strong> {doc.department || '—'}</span>
+        <span><strong style={{ color: C.text }}>Owner:</strong> {doc.owner || '—'}</span>
+        <span><strong style={{ color: C.text }}>Effective:</strong> {doc.effectiveDate || '—'}</span>
+        <span><strong style={{ color: C.text }}>Expires:</strong> {doc.expiryDate || '—'}</span>
+      </div>
+      {(doc.createdBy || doc.updatedBy) && (
+        <div style={{ fontSize: 11.5, color: C.faint, marginBottom: 14 }}>
+          {doc.createdBy && <>Created by {doc.createdBy}{doc.createdAt ? ` on ${doc.createdAt}` : ''}. </>}
+          {doc.updatedBy && <>Last edited by {doc.updatedBy}{doc.updatedAt ? ` on ${doc.updatedAt}` : ''}.</>}
+        </div>
+      )}
+      <div style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6, padding: 16, fontSize: 14, lineHeight: 1.7, whiteSpace: 'pre-wrap', minHeight: 100 }}>
+        {doc.content ? doc.content : <span style={{ color: C.faint }}>No content added yet.</span>}
+      </div>
+      {(doc.attachments && doc.attachments.length > 0) && (
+        <div style={{ marginTop: 20 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.03em', marginBottom: 10 }}>Attachments ({doc.attachments.length})</div>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
+            {doc.attachments.map(a => (
+              <AttachmentTile key={a.id} meta={a} url={attachmentUrlCache[a.id]} isLoading={!!loadingAttachments[a.id]} onLoad={() => onLoadAttachment(a)} />
+            ))}
+          </div>
+        </div>
+      )}
+      <div style={{ marginTop: 24, paddingTop: 12, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.faint }}>
+        Printed {todayISO()}
+      </div>
+    </div>
+  );
+}
+
+function SubmissionPrintContent({ submission, attachmentUrlCache, loadingAttachments, onLoadAttachment }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10.5, color: C.faint, marginBottom: 14, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Production Document Center</div>
+      <div style={{ fontSize: 11, color: C.faint, fontFamily: "'IBM Plex Mono', monospace", marginBottom: 6 }}>{submission.category}</div>
+      <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 21, margin: '0 0 6px' }}>{submission.title || submission.templateName}</h2>
+      {submission.title && submission.title !== submission.templateName && (
+        <div style={{ fontSize: 12, color: C.faint, marginBottom: 6 }}>{submission.templateName}</div>
+      )}
+      <div style={{ fontSize: 12.5, color: C.dim, marginBottom: 18 }}>
+        Filled out by <strong style={{ color: C.text }}>{submission.filledBy}</strong> on {submission.filledAt}
+        {submission.department ? ` · ${submission.department}` : ''}
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 22 }}>
+        {(submission.sectionsSnapshot || []).map(section => (
+          <div key={section.id}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.navy, marginBottom: 10, paddingBottom: 6, borderBottom: `2px solid ${C.border}` }}>
+              {section.title || 'Fields'}
+            </div>
+            {section.repeating ? (
+              (submission.values[section.id] || []).length === 0 ? (
+                <div style={{ fontSize: 12.5, color: C.faint }}>No entries logged.</div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {(submission.values[section.id] || []).map((row, i) => (
+                    <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 6, padding: 14 }}>
+                      <div style={{ fontSize: 10.5, fontWeight: 700, color: C.faint, marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Entry {i + 1}</div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                        {section.fields.filter(f => fieldVisible(f, row)).map(f => (
+                          <FieldAnswer key={f.id} field={f} value={row[f.id]} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={onLoadAttachment} />
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {section.fields.filter(f => fieldVisible(f, submission.values)).map(f => (
+                  <FieldAnswer key={f.id} field={f} value={submission.values[f.id]} attachmentUrlCache={attachmentUrlCache} loadingAttachments={loadingAttachments} onLoadAttachment={onLoadAttachment} />
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 24, paddingTop: 12, borderTop: `1px solid ${C.border}`, fontSize: 11, color: C.faint }}>
+        Printed {todayISO()}
+      </div>
+    </div>
+  );
+}
+
 
 // Read-only display of one field's answer — used in the submission detail view for
 // both flat (non-repeating) values and per-row values inside a repeating section.
