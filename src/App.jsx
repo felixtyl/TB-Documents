@@ -58,10 +58,76 @@ function fmtBytes(n) {
 function titleFromFilename(name) {
   return name.replace(/\.docx?$/i, '').replace(/[_-]+/g, ' ').trim();
 }
-async function extractWordText(file) {
+
+// Turns a base64 image payload from mammoth into a real File object, so it
+// can flow through the exact same attachment-upload path as a photo someone
+// picks from their device.
+function base64ToFile(base64, contentType, filename) {
+  const byteChars = atob(base64);
+  const bytes = new Uint8Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+  return new File([bytes], filename, { type: contentType || 'application/octet-stream' });
+}
+
+// Mammoth's HTML output keeps table structure (<table>/<tr>/<td>) that plain
+// extractRawText discards. This walks that HTML and produces readable plain
+// text — tables become simple " | "-separated rows — so it still fits the
+// app's plain-text Content/Description fields without needing a rich-text
+// editor or changing how documents are displayed or printed.
+function htmlToReadableText(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const lines = [];
+
+  function walk(node) {
+    for (const child of Array.from(node.childNodes)) {
+      if (child.nodeType === Node.TEXT_NODE) continue;
+      const tag = child.tagName ? child.tagName.toLowerCase() : '';
+      if (tag === 'table') {
+        child.querySelectorAll('tr').forEach(tr => {
+          const cells = Array.from(tr.querySelectorAll('td, th')).map(c => c.textContent.trim());
+          if (cells.some(c => c)) lines.push(cells.join(' | '));
+        });
+        lines.push('');
+      } else if (tag === 'li') {
+        lines.push('- ' + child.textContent.trim());
+      } else if (['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(tag)) {
+        const text = child.textContent.trim();
+        if (text) lines.push(text);
+        lines.push('');
+      } else if (['ul', 'ol'].includes(tag)) {
+        walk(child);
+        lines.push('');
+      } else {
+        walk(child);
+      }
+    }
+  }
+  walk(doc.body);
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// Extracts both the readable text (tables included) and any embedded
+// pictures from a .docx file. Returns File objects for the images so they
+// can be dropped straight into an attachments array.
+async function extractWordContent(file) {
   const arrayBuffer = await file.arrayBuffer();
-  const result = await mammoth.extractRawText({ arrayBuffer });
-  return result.value.trim();
+  const images = [];
+  let imgIndex = 0;
+  const result = await mammoth.convertToHtml(
+    { arrayBuffer },
+    {
+      convertImage: mammoth.images.imgElement(async (image) => {
+        const base64 = await image.read('base64');
+        imgIndex += 1;
+        const ext = (image.contentType || 'image/png').split('/')[1] || 'png';
+        const imgFile = base64ToFile(base64, image.contentType, `${titleFromFilename(file.name)}-image-${imgIndex}.${ext}`);
+        images.push(imgFile);
+        return { src: '' };
+      }),
+    }
+  );
+  const text = htmlToReadableText(result.value);
+  return { text, images, hadTables: /<table/i.test(result.value) };
 }
 function optionsForField(field) {
   if (!field) return [];
@@ -1198,6 +1264,7 @@ function DocumentForm({ form, setForm, onCancel, onSubmit, onRemoveExisting, inp
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
   const [fileError, setFileError] = useState(null);
   const [wordError, setWordError] = useState(null);
+  const [wordSummary, setWordSummary] = useState(null);
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef(null);
   const wordInputRef = useRef(null);
@@ -1217,10 +1284,17 @@ function DocumentForm({ form, setForm, onCancel, onSubmit, onRemoveExisting, inp
   async function handleWordFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setWordError(null); setImporting(true);
+    setWordError(null); setWordSummary(null); setImporting(true);
     try {
-      const text = await extractWordText(file);
-      setForm(f => ({ ...f, title: f.title || titleFromFilename(file.name), content: text }));
+      const { text, images, hadTables } = await extractWordContent(file);
+      const newAttachments = images
+        .filter(img => img.size <= MAX_FILE_BYTES)
+        .map(img => ({ id: uid('a'), name: img.name, type: img.type, size: img.size, file: img, isNew: true }));
+      setForm(f => ({ ...f, title: f.title || titleFromFilename(file.name), content: text, attachments: [...(f.attachments || []), ...newAttachments] }));
+      const parts = [];
+      if (hadTables) parts.push('table content included');
+      if (newAttachments.length > 0) parts.push(`${newAttachments.length} image${newAttachments.length === 1 ? '' : 's'} added as attachment${newAttachments.length === 1 ? '' : 's'}`);
+      setWordSummary(parts.length > 0 ? `Imported — ${parts.join(', ')}.` : 'Imported.');
     } catch (err) { setWordError('Could not read that file. Make sure it\'s a .docx Word document.'); }
     finally { setImporting(false); if (wordInputRef.current) wordInputRef.current.value = ''; }
   }
@@ -1233,6 +1307,7 @@ function DocumentForm({ form, setForm, onCancel, onSubmit, onRemoveExisting, inp
         </button>
         <input ref={wordInputRef} type="file" accept=".docx" onChange={handleWordFile} style={{ display: 'none' }} />
         {wordError && <span style={{ color: C.red, fontSize: 12 }}>{wordError}</span>}
+        {wordSummary && <span style={{ color: C.green, fontSize: 12 }}>{wordSummary}</span>}
       </div>
       <form onSubmit={onSubmit} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 24 }}>
         <div style={{ marginBottom: 16 }}><label style={labelStyle}>Title *</label>
@@ -1326,6 +1401,7 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
   const set = (k, v) => setTemplateForm(f => ({ ...f, [k]: v }));
   const [fileError, setFileError] = useState(null);
   const [wordError, setWordError] = useState(null);
+  const [wordSummary, setWordSummary] = useState(null);
   const [importing, setImporting] = useState(false);
   const fileInputRef = useRef(null);
   const wordInputRef = useRef(null);
@@ -1388,10 +1464,17 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
   async function handleWordFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setWordError(null); setImporting(true);
+    setWordError(null); setWordSummary(null); setImporting(true);
     try {
-      const text = await extractWordText(file);
-      setTemplateForm(f => ({ ...f, name: f.name || titleFromFilename(file.name), description: text }));
+      const { text, images, hadTables } = await extractWordContent(file);
+      const newAttachments = images
+        .filter(img => img.size <= MAX_FILE_BYTES)
+        .map(img => ({ id: uid('a'), name: img.name, type: img.type, size: img.size, file: img, isNew: true }));
+      setTemplateForm(f => ({ ...f, name: f.name || titleFromFilename(file.name), description: text, attachments: [...(f.attachments || []), ...newAttachments] }));
+      const parts = [];
+      if (hadTables) parts.push('table content included');
+      if (newAttachments.length > 0) parts.push(`${newAttachments.length} image${newAttachments.length === 1 ? '' : 's'} added as reference attachment${newAttachments.length === 1 ? '' : 's'}`);
+      setWordSummary(parts.length > 0 ? `Imported — ${parts.join(', ')}.` : 'Imported.');
     } catch (err) { setWordError('Could not read that file. Make sure it\'s a .docx Word document.'); }
     finally { setImporting(false); if (wordInputRef.current) wordInputRef.current.value = ''; }
   }
@@ -1408,6 +1491,7 @@ function TemplateForm({ templateForm, setTemplateForm, onCancel, onSubmit, onRem
         </button>
         <input ref={wordInputRef} type="file" accept=".docx" onChange={handleWordFile} style={{ display: 'none' }} />
         {wordError && <span style={{ color: C.red, fontSize: 12 }}>{wordError}</span>}
+        {wordSummary && <span style={{ color: C.green, fontSize: 12 }}>{wordSummary}</span>}
         <span style={{ fontSize: 11.5, color: C.faint }}>Fills in the name and description below — add your sections and fields manually after.</span>
       </div>
       <form onSubmit={onSubmit} style={{ background: '#fff', border: `1px solid ${C.border}`, borderRadius: 8, padding: 24 }}>
